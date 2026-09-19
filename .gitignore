@@ -1,0 +1,5 @@
+~$*.xlsm
+~$*.xlsx
+.~lock*
+Thumbs.db
+desktop.ini

@@ -1,0 +1,3346 @@
+Attribute VB_Name = "Module1"
+Option Explicit
+' =============================================================================
+' MODULE:  Main Workbook Logic
+' AUTHOR:  Tiaan (with help from Google, StackOverflow, and GitHub)
+' VERSION: GitHub Version 1.7
+'
+' PURPOSE:
+'   This module manages the "Pakplan Vordering" (Packing Plan Progress) system.
+'   It pulls pallet intake and dispatch data from a SQL database (via Power Query),
+'   builds a structured progress-tracking sheet ("Vordering"), calculates pallet
+'   counts per variety/grade/pack/size, generates a summary sheet ("Opsomming"),
+'   creates pie charts ("Grafieke"), and exports + emails a report workbook.
+'
+' SHEET OVERVIEW:
+'   "Pakplan"    - Source packing plan (read from here, not modified much)
+'   "Data"       - Power Query output: pallet intake from SQL DB
+'   "Vordering"  - Main progress tracking sheet (built by Setup_Stuff)
+'   "Opsomming"  - Summary sheet (built by Short_Stuff)
+'   "Grafieke"   - Charts sheet (built by Chart_Stuff)
+'
+' MAIN ENTRY POINTS (also exposed to the Ribbon via _R wrapper subs):
+'   Setup_Stuff  - Builds the Vordering sheet from Pakplan
+'   Update_Stuff - Refreshes SQL data and recalculates all values
+'   Input_Stuff  - Writes COUNTIFS formulas into Vordering cells
+'   Short_Stuff  - Builds/updates the Opsomming summary sheet
+'   Chart_Stuff  - Builds/updates the Grafieke charts sheet
+'   Export_Stuff - Saves a clean copy of the workbook and emails it
+'
+' KEY CONSTANTS / GLOBALS:
+'   startline    - The row on Vordering where data headers begin (row 3)
+'   mServer/mDB  - SQL server connection strings (defined in a separate module)
+'   mSave/mTo/mCC/mBCC - Export path and email addresses (separate module)
+' =============================================================================
+
+' --- Module-level variables ---
+' These are shared across multiple subs in this module.
+
+Dim curper As Integer       ' Tracks current progress bar % between sub calls
+Dim totCol As Integer       ' Column number (as integer) of the TOTAL column in Vordering
+Dim weeknumber As Integer   ' Week number extracted from the Pakplan title cell
+Dim totPerc As Integer      ' Current overall progress percentage (0-100)
+Dim vari As String          ' Variety name (read from Vordering cell D4)
+Dim farmarray() As String   ' (Reserved) Array of farm codes - not fully implemented
+Dim tName As String         ' Pack type name parsed from the Pakplan title
+Dim pName As String         ' Sheet name for "Pakplan"
+Dim oName As String         ' Sheet name for "Oorsig"
+Dim shName As String        ' Sheet name for "Vordering"
+Dim ansName As String       ' Sheet name for "Data" (the Power Query output sheet)
+Dim WeekNumb As String      ' Week number string for file naming / email subject
+Dim ribref As Boolean       ' True if Input_Stuff was called from the Ribbon directly
+Dim pickedref1 As String    ' Starting Pick Reference for the data query range
+Dim pickedref2 As String    ' Ending Pick Reference for the data query range
+Dim dTable As ListObject    ' (Reserved) Reference to the DataQuery table object
+Public gRibbon As IRibbonUI ' Ribbon UI reference for refreshing custom controls
+
+'Oorsig add-on
+'Const OORSIG_NAME  As String = "Oorsig"
+Const GAP_COLS     As Integer = 3
+Const MAX_CMT_COLS As Integer = 10
+
+' Row on Vordering/Pakplan where the actual data header row sits.
+' Rows 1 and 2 are used for title/formatting; row 3 is the header.
+Const startline As Integer = 3
+
+
+' =============================================================================
+' WORKBOOK OPEN
+' Runs automatically when the workbook is opened.
+' Ensures the "Data" sheet exists and initialises key control cells used
+' throughout the system (ribbon state, pick reference anchors, etc.).
+' =============================================================================
+Private Sub Workbook_Open()
+
+    ' Create the Data sheet if it doesn't exist yet
+    If Not sheetExists("Data") Then
+        ThisWorkbook.Sheets.Add.Name = "Data"
+        ThisWorkbook.Worksheets("Data").Visible = xlSheetVisible
+        ' NOTE: The table creation block below is commented out.
+        ' If you need to re-enable it, uncomment and make sure
+        ' "DataQuery" doesn't already exist before calling .Add.
+        'If Not tableExists("Data", "DataQuery") Then
+        '    Set dTable = ThisWorkbook.Worksheets("Data").ListObjects.Add(...)
+        '    dTable.Name = "DataQuery"
+        'End If
+    End If
+
+    ' Initialise ribbon/filter control cells on the Data sheet (if blank):
+    '   U1 = Farm filter ("All" / "Mahela" / "Other") - used in Power Query M code
+    '   V1 = Valencia grouping toggle ("ON" groups DEL/APV/MKN/GSV as "VAL"; "OFF" keeps separate)
+    '   Y1 = "Current Week" auto-mode ("ON" = use today's pick ref; "OFF" = user must enter)
+    If ThisWorkbook.Sheets("Data").Range("U1").Value = "" Then ThisWorkbook.Sheets("Data").Range("U1").Value = "All"
+    If ThisWorkbook.Sheets("Data").Range("V1").Value = "" Then ThisWorkbook.Sheets("Data").Range("V1").Value = "OFF"
+    If ThisWorkbook.Sheets("Data").Range("Y1").Value = "" Then ThisWorkbook.Sheets("Data").Range("Y1").Value = "OFF"
+
+    ' Calculate and store the current Pick Reference codes in Data!Z1 and Data!AA1.
+    ' Pick References are encoded as a 4-digit string combining week number and day.
+    ' The encoding differs for week numbers < 10 vs >= 10 to keep them sortable.
+    '
+    ' Z1  = "Start of week" pick ref  (e.g. week 7 = "7100")
+    ' AA1 = "Current day" pick ref    (e.g. week 7 Monday = "7100", Tuesday = "7200")
+    '
+    ' TODO: The magic number 35 in GetRainbowColor and the encoding logic here
+    '       are interrelated. If the pick ref format changes, update both places.
+    If WorksheetFunction.WeekNum(Date, vbSunday) < 10 Then
+        ' Single-digit week: format is WeekNum & DayOfWeek & "00"
+        ThisWorkbook.Sheets("Data").Range("AA1").Value = WorksheetFunction.WeekNum(Date, vbMonday) & Weekday(Date, vbMonday) & "00"
+        ThisWorkbook.Sheets("Data").Range("Z1").Value = WorksheetFunction.WeekNum(Date, vbMonday) & "100"
+    Else
+        ' Double-digit week: split the digits so the string stays 4 chars and sortable
+        ' e.g. week 12, day 3 => "2103" (last digit of week & "10" & first digit of week... CHECK THIS)
+        ' TODO: This encoding is non-obvious. Consider a cleaner approach or add a unit test.
+        ThisWorkbook.Sheets("Data").Range("AA1").Value = Right(Str(WorksheetFunction.WeekNum(Date, vbMonday)), 1) & Weekday(Date, vbMonday) & "0" & Mid(Str(WorksheetFunction.WeekNum(Date, vbMonday)), 2, 1)
+        ThisWorkbook.Sheets("Data").Range("Z1").Value = Right(Str(WorksheetFunction.WeekNum(Date, vbMonday)), 1) & "10" & Mid(Str(WorksheetFunction.WeekNum(Date, vbMonday)), 2, 1)
+    End If
+
+End Sub
+
+
+' =============================================================================
+' HELPER: sheetExists
+' Returns True if a sheet with the given name exists in the workbook.
+' Used before adding new sheets or accessing sheets that may not exist yet.
+'
+' PARAMETERS:
+'   sheetToFind  - Name of the sheet to look for
+'   InWorkbook   - Optional: which workbook to check (defaults to ThisWorkbook)
+' =============================================================================
+Public Function sheetExists(sheetToFind As String, Optional InWorkbook As Workbook) As Boolean
+    If InWorkbook Is Nothing Then Set InWorkbook = ThisWorkbook
+    On Error Resume Next
+    sheetExists = Not InWorkbook.Sheets(sheetToFind) Is Nothing
+    On Error GoTo 0
+End Function
+
+
+' =============================================================================
+' HELPER: tableExists
+' Returns True if a ListObject (Excel Table) with the given name exists
+' on the specified sheet. Used to avoid duplicate table creation.
+'
+' PARAMETERS:
+'   sheetName  - Name of the worksheet to check
+'   tableName  - Name of the ListObject/table to find
+' =============================================================================
+Function tableExists(sheetName As String, tableName As String) As Boolean
+    Dim ws As Worksheet
+    Dim tbl As ListObject
+    On Error Resume Next
+    Set ws = ThisWorkbook.Sheets(sheetName)
+    If ws Is Nothing Then Exit Function
+    For Each tbl In ws.ListObjects
+        If tbl.Name = tableName Then
+            tableExists = True
+            Exit Function
+        End If
+    Next tbl
+End Function
+
+
+' =============================================================================
+' HELPER: fnDateFromWeek
+' Calculates a specific date from a year, ISO week number, and weekday.
+' e.g. fnDateFromWeek(2025, 7, 1) = the Monday of week 7 in 2025
+'
+' PARAMETERS:
+'   iYear    - 4-digit year
+'   iWeek    - Week number (1-53)
+'   iWeekDday - Day of week (1=Mon, 7=Sun depending on locale)
+' =============================================================================
+Function fnDateFromWeek(ByVal iYear As Integer, ByVal iWeek As Integer, ByVal iWeekDday As Integer)
+    fnDateFromWeek = DateSerial(iYear, 1, ((iWeek - 1) * 7) + iWeekDday - Weekday(DateSerial(iYear, 1, 1)) + 1)
+End Function
+
+
+' =============================================================================
+' HELPER: charCheck
+' Converts an ASCII character code to a column letter string.
+' Handles columns beyond Z (e.g. AA, AB...) by prepending "A".
+'
+' PARAMETERS:
+'   charVal - ASCII value of a column letter (65=A, 90=Z, 91+ = AA, AB...)
+'
+' NOTE: Currently only handles up to AZ (column 52). If you ever need
+'       columns beyond AZ, this function needs to be expanded.
+'       The current logic just prefixes "A" for anything > 90, which means
+'       91="AA", 92="AB", ..., 116="AZ". Beyond that it would break.
+' =============================================================================
+Public Function charCheck(charVal) As String
+    If charVal > 90 Then
+        charCheck = "A" & Chr(charVal - 26)
+    Else
+        charCheck = Chr(charVal)
+    End If
+End Function
+
+
+' =============================================================================
+' HELPER: CondFormAddRule
+' Adds a conditional formatting rule to a range that colours the cell
+' based on whether its value meets a numeric comparison against 0.
+'
+' PARAMETERS:
+'   rng    - The Range to apply formatting to
+'   sOp    - The comparison operator constant (e.g. 3=greater than, 5=less than, 6=equal)
+'            XlFormatConditionOperator values:
+'              xlBetween=1, xlNotBetween=2, xlEqual=3, xlNotEqual=4,
+'              xlGreater=5, xlLess=6, xlGreaterEqual=7, xlLessEqual=8
+'   lColor - The RGB colour to apply to the cell interior
+' =============================================================================
+Public Sub CondFormAddRule(rng, sOp, lColor)
+    With rng.FormatConditions.Add(xlCellValue, sOp, "0")
+        .Interior.Color = lColor
+        .StopIfTrue = True  ' Stop evaluating further rules if this one matches
+    End With
+End Sub
+
+
+' =============================================================================
+' HELPER: ForceRibbonRefresh
+' Forces the custom Ribbon labels (e.g. "Last Updated", "Last Sent")
+' to re-read their values and redisplay.
+' Called after data updates and after sending email.
+' =============================================================================
+Sub ForceRibbonRefresh()
+    If Not gRibbon Is Nothing Then
+        gRibbon.InvalidateControl "lblLastUpdated"
+        gRibbon.InvalidateControl "lblLastSent"
+    End If
+End Sub
+
+
+' =============================================================================
+' HELPER: GetRainbowColor
+' Returns an RGB Long colour that cycles through the rainbow spectrum.
+' Used to animate the progress bar with a cycling colour effect.
+'
+' PARAMETERS:
+'   progress - A number that increases as processing progresses.
+'              The function wraps it within a 0-35 range (one full cycle = 35 units).
+'
+' NOTE: The value 35 is the cycle length. It was empirically chosen.
+'       If you change the number of colour steps or the range, update this value.
+'       The steps array defines: Red -> Orange -> Yellow -> Green -> Blue -> Violet -> Red
+' =============================================================================
+Function GetRainbowColor(progress As Double) As Long
+    ' Define 7 colour stops for the full spectrum (the last repeats the first to close the loop)
+    Dim steps As Variant
+    steps = Array( _
+        Array(255, 0, 0), _
+        Array(255, 127, 0), _
+        Array(255, 255, 0), _
+        Array(0, 255, 0), _
+        Array(0, 0, 255), _
+        Array(198, 0, 198), _
+        Array(255, 0, 0))
+' Red
+' Orange
+' Yellow
+' Green
+' Blue
+' Violet
+' Red again (closes the loop)
+
+    ' Wrap progress into the 0-35 range (one full rainbow cycle)
+    Do
+        If progress >= 35 Then progress = progress - 35
+    Loop Until progress < 35
+
+    ' Map progress (0-35) to a position along the colour stops (0-6)
+    Dim pos As Double
+    pos = progress / (UBound(steps))
+
+    Dim i As Integer: i = Int(pos)          ' Which segment we're in
+    Dim t As Double: t = pos - i            ' How far through that segment (0.0 to 1.0)
+
+    ' Handle edge case: exactly at the last stop
+    If i >= UBound(steps) Then
+        GetRainbowColor = RGB(steps(i)(0), steps(i)(1), steps(i)(2))
+        Exit Function
+    End If
+
+    ' Linearly interpolate between the two surrounding colour stops
+    Dim r As Long, g As Long, b As Long
+    r = steps(i)(0) + t * (steps(i + 1)(0) - steps(i)(0))
+    g = steps(i)(1) + t * (steps(i + 1)(1) - steps(i)(1))
+    b = steps(i)(2) + t * (steps(i + 1)(2) - steps(i)(2))
+
+    GetRainbowColor = RGB(r, g, b)
+End Function
+
+
+' =============================================================================
+' HELPER: GetProgressColor
+' Returns a colour that transitions Red -> Yellow -> Green based on a 0.0-1.0
+' progress fraction. Used to colour the progress bar during Input_Stuff and
+' Short_Stuff (where rainbow cycling would be distracting).
+'
+' PARAMETERS:
+'   progress - A value between 0.0 (start) and 1.0 (complete)
+'              Values outside this range are clamped.
+' =============================================================================
+Function GetProgressColor(progress As Double) As Long
+    If progress < 0 Then progress = 0
+    If progress > 1 Then progress = 1
+
+    Dim r As Long, g As Long, b As Long
+    b = 0   ' No blue component in any phase
+
+    If progress < 0.5 Then
+        ' Phase 1 (0% to 50%): Red to Yellow
+        ' Red stays at max; green ramps up from 0 to 255
+        r = 255
+        g = 255 * (progress / 0.5)
+    Else
+        ' Phase 2 (50% to 100%): Yellow to Green
+        ' Red ramps down from 255 to 0; green stays near 255 (slight fade)
+        r = 255 * (1 - ((progress - 0.5) / 0.5))
+        g = 255 - (progress * 255 / 8)   ' Slight fade to avoid overly bright green
+    End If
+
+    GetProgressColor = RGB(r, g, b)
+End Function
+
+
+' =============================================================================
+' HELPER: IsInSoftCitrusRange
+' Checks whether a "soft citrus" size code (like "1X", "1XX") falls within
+' a given low-to-high range using a custom ordering for these codes.
+'
+' Soft citrus sizes use a non-numeric ordering:
+'   1XXXX > 1XXX > 1XX > 1X > 1 > 2 > 3 > 4 > 5 > 6  (largest to smallest)
+' (i.e. 1XXXX is the largest fruit, 6 is the smallest)
+'
+' PARAMETERS:
+'   val  - The size code to check (e.g. "1X", "2")
+'   low  - The lower bound of the acceptable range (e.g. "1X")
+'   high - The upper bound of the acceptable range (e.g. "3")
+'
+' RETURNS: True if val falls within [low, high] in the soft citrus ordering
+'
+' NOTE: 2-character codes that are NOT "1X", and 3-character codes that are
+'       NOT "1XX" are immediately rejected (they don't belong to this system).
+' =============================================================================
+Function IsInSoftCitrusRange(val As String, low As String, high As String) As Boolean
+    val = Replace(val, " ", "")  ' Strip spaces (Str() adds a leading space to numbers)
+
+    ' Reject 2-char codes that aren't "1X"
+    If Len(val) = 2 And val <> "1X" Then
+        IsInSoftCitrusRange = False
+        Exit Function
+    End If
+    ' Reject 3-char codes that aren't "1XX"
+    If Len(val) = 3 And val <> "1XX" Then
+        IsInSoftCitrusRange = False
+        Exit Function
+    End If
+
+    ' Define the canonical ordering of soft citrus size codes
+    Dim citrusOrder As Variant
+    citrusOrder = Array("1XXXX", "1XXX", "1XX", "1X", "1", "2", "3", "4", "5", "6")
+
+    Dim iVal As Long: iVal = -1
+    Dim iLow As Long: iLow = -1
+    Dim iHigh As Long: iHigh = -1
+    Dim i As Long
+
+    ' Find the array index for val, low, and high
+    For i = LBound(citrusOrder) To UBound(citrusOrder)
+        If citrusOrder(i) = val Then iVal = i
+        If citrusOrder(i) = low Then iLow = i
+        If citrusOrder(i) = high Then iHigh = i
+    Next i
+
+    ' Only return True if all three codes were found in the known order
+    If iVal <> -1 And iLow <> -1 And iHigh <> -1 Then
+        IsInSoftCitrusRange = (iVal >= iLow And iVal <= iHigh)
+    Else
+        IsInSoftCitrusRange = False  ' Unknown code = graceful fallback
+    End If
+End Function
+
+
+' =============================================================================
+' HELPER: IsCountAsOrdered
+' Parses the comment text of a packing plan line to determine whether a
+' given count/size should be treated as "packed as ordered" (i.e. count
+' matches the order regardless of the standard size range).
+'
+' This is used in Setup_Stuff to choose the correct Overpack formula:
+'   - "As Ordered" lines: overpack is measured against the actual ordered count
+'   - Standard lines: overpack is measured against the total pallets needed
+'
+' PARAMETERS:
+'   countToCheck - The size/count value from the Vordering header row (e.g. "64", "36(45)")
+'   commentText  - The full comment string from the Pakplan COMMENTS column
+'                  (e.g. "Pack 64 as ordered", "36-45 as ordered", "Pack as ordered")
+'
+' RETURNS: True if countToCheck falls within an "X as ordered" instruction
+'          found in commentText.
+'
+' HOW IT WORKS:
+'   1. If the comment says "PACK AS ORDERED" without a number prefix, all counts qualify.
+'   2. Otherwise the regex finds patterns like "64ASORDERED", "36-45ASORDERED",
+'      "56&64ASORDERED", etc. and checks if countToCheck falls in those ranges.
+'   3. For compound counts like "36(45)", both parts are checked individually.
+'   4. For soft citrus codes (1X, 1XX etc.), IsInSoftCitrusRange is used.
+' =============================================================================
+Function IsCountAsOrdered(countToCheck As String, commentText As String) As Boolean
+    Dim pattern As String
+    Dim matches As Object
+    Dim regex As Object
+    Dim part As Variant
+    Dim brackCheck As Boolean, isNum As Boolean
+
+    Set regex = CreateObject("VBScript.RegExp")
+    commentText = Replace(UCase(commentText), " ", "")
+    brackCheck = False
+    isNum = False
+
+    ' --- Special case: bare "PACK AS ORDERED" (no specific count prefix) ---
+    If InStr(commentText, "PACKASORDERED") > 0 Then
+        Dim packIndex As Long
+        packIndex = InStr(commentText, "PACKASORDERED")
+        ' Check whether there's a digit immediately before "PACKASORDERED"
+        If packIndex > 1 Then isNum = IsNumeric(Mid(commentText, packIndex - 1, 1))
+        If packIndex = 1 Or isNum = False Then
+            ' No digit before it = applies to all counts
+            IsCountAsOrdered = True
+            Exit Function
+        End If
+    End If
+
+    ' Strip "PACK" and "COUNT" keywords and commas before regex matching
+    commentText = Replace(commentText, "PACK", "")
+    commentText = Replace(commentText, "COUNT", "")
+    commentText = Replace(commentText, ",", "")
+
+    ' --- Handle compound counts: "36(45)" -> split into ["36", "45"] ---
+    Dim countParts As Variant
+    If InStr(countToCheck, "(") > 0 Then
+        countParts = Split(Replace(Replace(countToCheck, "(", ","), ")", ""), ",")
+        brackCheck = True
+    Else
+        ReDim countParts(0)
+        countParts(0) = countToCheck
+        brackCheck = False
+    End If
+
+    ' --- Regex: match patterns like "64ASORDERED", "36-45ASORDERED", "56&64ASORDERED" ---
+    ' Pattern breakdown:
+    '   ((\d+X*)(?:-(\d+X*))?)  = a count or range like "64", "36-45", "1X-3"
+    '   (?:&(...))*              = optional additional counts joined by "&"
+    '   ASORDERED                = literal end marker
+    With regex
+        .Global = True
+        .IgnoreCase = True
+        .pattern = "((\d+X*)(?:-(\d+X*))?)(?:&((\d+X*)(?:&(\d+X*))?))*ASORDERED"
+    End With
+
+    If regex.Test(commentText) Then
+        Set matches = regex.Execute(commentText)
+        Dim i As Integer
+        For i = 0 To matches.Count - 1
+            Dim m As Object: Set m = matches(i)
+
+            ' Strip "ASORDERED" suffix, then split remaining by "&" to get each count/range
+            Dim block As String: block = Replace(m, "ASORDERED", "")
+            Dim segments As Variant: segments = Split(block, "&")
+            Dim seg As Variant
+
+            For Each seg In segments
+                ' Each segment is either a single count ("64") or a range ("36-45")
+                Dim lowerbound As String, upperbound As String
+                If InStr(seg, "-") > 0 Then
+                    lowerbound = Split(seg, "-")(0)
+                    upperbound = Split(seg, "-")(1)
+                Else
+                    lowerbound = seg
+                    upperbound = seg
+                End If
+
+                ' Check the count(s) against this range
+                If brackCheck Then
+                    ' Compound count: check each part separately
+                    For Each part In countParts
+                        If IsInSoftCitrusRange(Str(part), lowerbound, upperbound) Then
+                            IsCountAsOrdered = True
+                            Exit Function
+                        ElseIf part >= lowerbound And part <= upperbound Then
+                            IsCountAsOrdered = True
+                            Exit Function
+                        End If
+                    Next part
+                Else
+                    ' Simple count: direct numeric or soft-citrus comparison
+                    If IsInSoftCitrusRange(countToCheck, lowerbound, upperbound) Then
+                        IsCountAsOrdered = True
+                        Exit Function
+                    ElseIf countToCheck >= lowerbound And countToCheck <= upperbound Then
+                        IsCountAsOrdered = True
+                        Exit Function
+                    End If
+                End If
+            Next seg
+        Next i
+    End If
+    ' If no match found, return False (implicit via unset boolean)
+End Function
+
+'====================================================================================================================================
+
+' =============================================================================
+' OORSIG_AND_SETUP_V2.bas
+' =============================================================================
+' This version incorporates corrections found by inspecting a real Pakplan file.
+'
+' KEY CORRECTIONS vs v1:
+'
+'   (A) CONSECUTIVE ORDER ROWS (no blank row between them)
+'       Multiple places have two or more M=H/S rows sitting directly adjacent
+'       (Europe 20-21, Canada 71-73, Malaysia 68-69, Bangladesh 82-83,
+'       Russia 90-91-92, China 50-51). The v1 stop condition ("stop when you
+'       see the next M=H/S row") would collect zero comments for every order
+'       after the first in such a block.
+'       FIX: The scan now stops on the next M=H/S row only if that row ALSO
+'       has a top border on the TERM column (meaning it genuinely starts a new
+'       block), OR if it is immediately adjacent (scanRow = srcRows(r)+1),
+'       in which case there are no comment rows between them anyway.
+'
+'   (B) TOP BORDER ABSENT ON MANY VALID ORDER ROWS
+'       Canada 72-73, Malaysia 69, Bangladesh 83, Russia 91-92, China 51 all
+'       have M=H/S but NO top border. The border is used only as a stop signal
+'       during comment scanning, not to identify order rows. M="H"/"S" remains
+'       the sole reliable order-row identifier. No code change needed here,
+'       but the logic comment is clarified.
+'
+'   (C) BORDER STYLE CAN BE "dashed" AS WELL AS "thin"
+'       Both styles appear in a real Pakplan. The VBA check `<> xlNone`
+'       already handles both. No change needed.
+'
+'   (D) IsNumeric GUARD ON COLUMN N AND O (carton count derivation)
+'       For M="S" rows, column O contains a formula string like "=+Z90/88"
+'       rather than a calculated number when cells are copied as values.
+'       The v1 check `(N + O) > 0` would fail or produce garbage.
+'       FIX: IsNumeric() guard added before using N/O for carton count.
+'
+'   (E) "SAME KEY, NO SIZE OVERLAP" = intentional splits, NOT duplicates
+'       Canada rows 71-73, Europe COBW28 rows 37/39/41 have identical key
+'       fields but non-overlapping size columns. They are intentional splits
+'       per container type. The size-overlap requirement correctly excludes
+'       these from the DUP_OF flag. No change needed; comment clarified.
+'
+'   (F) TRUE DUPLICATES ARE CROSS-WEEK CARRYOVERS (different batch numbers)
+'       Real duplicates found: rows 7 vs 45 (VDW27 vs TFCW28),
+'       10 vs 78 (ZLW27 vs ZLW28), 14 vs 62 (Z8W27 vs Z8W28).
+'       BATCH NR is deliberately excluded from the duplicate key fields.
+' =============================================================================
+
+
+
+''''''====================================================================================================================================
+'''''
+'''''' =============================================================================
+'''''' BUILD_OORSIG
+'''''' Reads Pakplan and produces a clean flat-list sheet ("Oorsig").
+'''''' One row per order (M="H" or "S"). All columns A-TOTAL are copied.
+'''''' Comments collected into an indexed block to the right.
+'''''' DUP_OF column flags orders that duplicate an earlier row.
+'''''' =============================================================================
+'''''Public Sub Build_Oorsig()
+'''''
+'''''    Dim wsP As Worksheet
+'''''    Set wsP = ThisWorkbook.Worksheets(pName)
+'''''
+'''''    ' --- Locate header and TOTAL column in Pakplan ---
+'''''    Dim rFirstCell As Range
+'''''    Set rFirstCell = wsP.Cells.Find("MAR*", SearchOrder:=xlByRows, SearchDirection:=xlNext)
+'''''    If rFirstCell Is Nothing Then
+'''''        MsgBox "Could not find the header row in '" & pName & "'." & Chr(13) & _
+'''''               "Expected a cell beginning with 'MAR' (e.g. MARKET) in column A.", vbExclamation
+'''''        Exit Sub
+'''''    End If
+'''''    Dim headerRow As Long: headerRow = rFirstCell.Row
+'''''    Dim finalRow  As Long
+'''''    finalRow = wsP.Cells.Find("*", SearchOrder:=xlByRows, SearchDirection:=xlPrevious).Row
+'''''
+'''''    Dim rTotCell As Range
+'''''    Set rTotCell = wsP.Range("Q" & headerRow & ":AZ" & headerRow).Find("TOT*", , xlValues, xlWhole)
+'''''    If rTotCell Is Nothing Then
+'''''        MsgBox "Could not find TOTAL column in '" & pName & "'.", vbExclamation
+'''''        Exit Sub
+'''''    End If
+'''''    Dim colTot     As Long: colTot = rTotCell.Column
+'''''    Dim colComm    As Long: colComm = colTot + 1
+'''''    Dim colTerm    As Long: colTerm = colTot + 2
+'''''    Dim colFirstSz As Long: colFirstSz = 17
+'''''    Dim colLastSz  As Long: colLastSz = colTot - 1
+'''''
+'''''    ' --- Create or clear Oorsig ---
+'''''    Dim wsO As Worksheet
+'''''    If sheetExists(oName) Then
+'''''        Set wsO = ThisWorkbook.Worksheets(oName)
+'''''        wsO.Cells.Clear
+'''''    Else
+'''''        ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.count)).Name = oName
+'''''        Set wsO = ThisWorkbook.Worksheets(oName)
+'''''    End If
+'''''    wsO.Visible = xlSheetVisible
+'''''
+'''''    ' --- Layout column positions ---
+'''''    Dim colDup      As Long: colDup = colTot + 1
+'''''    Dim colCmtStart As Long: colCmtStart = colDup + 1 + GAP_COLS
+'''''    ' colCmtStart   = IDX column
+'''''    ' colCmtStart+1 = PAK_ROW column
+'''''    ' colCmtStart+2 = CMT_1, colCmtStart+3 = CMT_2, etc.
+'''''
+'''''    ' --- Write header row ---
+'''''    wsP.Range(wsP.Cells(headerRow, 1), wsP.Cells(headerRow, colTot)).Copy
+'''''    wsO.Range("A1").PasteSpecial Paste:=xlPasteValues
+'''''    wsO.Range("A1").PasteSpecial Paste:=xlPasteFormats
+'''''    Application.CutCopyMode = False
+'''''
+'''''    Dim c As Long
+'''''    For c = 1 To colTot
+'''''        wsO.Columns(c).ColumnWidth = wsP.Columns(c).ColumnWidth
+'''''    Next c
+'''''
+'''''    wsO.Cells(1, colDup).Value = "DUP_OF"
+'''''    wsO.Cells(1, colDup).Font.Bold = True
+'''''    wsO.Cells(1, colCmtStart).Value = "IDX"
+'''''    wsO.Cells(1, colCmtStart + 1).Value = "PAK_ROW"
+'''''    Dim ci As Long
+'''''    For ci = 1 To MAX_CMT_COLS
+'''''        wsO.Cells(1, colCmtStart + 1 + ci).Value = "CMT_" & ci
+'''''    Next ci
+'''''    wsO.Range(wsO.Cells(1, colCmtStart), wsO.Cells(1, colCmtStart + 1 + MAX_CMT_COLS)).Font.Bold = True
+'''''
+'''''    ' =========================================================================
+'''''    ' PASS 1 — Copy order rows (M = "H" or "S") from Pakplan to Oorsig
+'''''    ' =========================================================================
+'''''    Dim oRow      As Long: oRow = 1
+'''''    Dim pakRow    As Long
+'''''    Dim srcRows() As Long
+'''''    ReDim srcRows(1 To 1)
+'''''
+'''''    For pakRow = headerRow + 1 To finalRow
+'''''        Dim mVal As String: mVal = Trim(CStr(wsP.Cells(pakRow, "M").Value))
+'''''        If mVal = "H" Or mVal = "S" Then
+'''''            oRow = oRow + 1
+'''''            wsP.Range(wsP.Cells(pakRow, 1), wsP.Cells(pakRow, colTot)).Copy
+'''''            wsO.Cells(oRow, 1).PasteSpecial Paste:=xlPasteValues
+'''''            Application.CutCopyMode = False
+'''''            wsO.Cells(oRow, colDup).Value = 0
+'''''            ReDim Preserve srcRows(1 To oRow - 1)
+'''''            srcRows(oRow - 1) = pakRow
+'''''        End If
+'''''    Next pakRow
+'''''
+'''''    Dim totalOrders As Long: totalOrders = oRow - 1
+'''''    If totalOrders = 0 Then
+'''''        MsgBox "No order rows (M = 'H' or 'S') found in '" & pName & "'.", vbExclamation
+'''''        Exit Sub
+'''''    End If
+'''''
+'''''    ' =========================================================================
+'''''    ' PASS 2 — Collect comment lines for each order row
+'''''    '
+'''''    ' For each order, scan Pakplan forward from its source row collecting
+'''''    ' non-empty COMMENTS column values.
+'''''    '
+'''''    ' STOP SCANNING when:
+'''''    '   (a) The scanned row is another M=H/S row AND has a top border on TERM
+'''''    '       => genuine new block starting
+'''''    '   (b) The scanned row is another M=H/S row AND is the very next row
+'''''    '       (scanRow = srcRows(r)+1) => consecutive orders with no gap, so no
+'''''    '       comment rows can exist between them
+'''''    '   (c) Column A = "GRAND TOTAL"
+'''''    '   (d) Reached finalRow
+'''''    '
+'''''    ' NOTE: Many valid order rows have M=H/S but NO top border (Canada 72-73,
+'''''    ' Malaysia 69, Bangladesh 83, Russia 91-92). These are identified as orders
+'''''    ' by their M value in Pass 1, not by borders. The border check here is
+'''''    ' purely a stop signal for the comment scan, not an order detector.
+'''''    ' =========================================================================
+'''''    Dim r       As Long
+'''''    Dim scanRow As Long
+'''''    Dim cmtIdx  As Long
+'''''    Dim cmtVal  As String
+'''''
+'''''    For r = 1 To totalOrders
+'''''        cmtIdx = 0
+'''''        Dim oDataRow As Long: oDataRow = r + 1
+'''''        wsO.Cells(oDataRow, colCmtStart).Value = oDataRow
+'''''        wsO.Cells(oDataRow, colCmtStart + 1).Value = srcRows(r)
+'''''
+'''''        For scanRow = srcRows(r) To finalRow
+'''''
+'''''            If scanRow > srcRows(r) Then
+'''''                ' Check if this is another order row
+'''''                Dim mchk As String: mchk = Trim(CStr(wsP.Cells(scanRow, "M").Value))
+'''''                If mchk = "H" Or mchk = "S" Then
+'''''                    ' Condition (a): has a top border on TERM => new block
+'''''                    Dim hasBorder As Boolean: hasBorder = False
+'''''                    With wsP.Cells(scanRow, colTerm).Borders(xlEdgeTop)
+'''''                        hasBorder = (.LineStyle <> xlNone)
+'''''                    End With
+'''''                    ' Condition (b): immediately adjacent => no comment rows between
+'''''                    Dim isAdjacent As Boolean: isAdjacent = (scanRow = srcRows(r) + 1)
+'''''                    If hasBorder Or isAdjacent Then Exit For
+'''''                End If
+'''''                ' Condition (c): GRAND TOTAL
+'''''                If UCase(Trim(CStr(wsP.Cells(scanRow, 1).Value))) = "GRAND TOTAL" Then Exit For
+'''''            End If
+'''''
+'''''            ' Collect non-empty comment value
+'''''            cmtVal = Trim(CStr(wsP.Cells(scanRow, colComm).Value))
+'''''            If cmtVal <> "" And cmtVal <> "0" Then
+'''''                cmtIdx = cmtIdx + 1
+'''''                If cmtIdx <= MAX_CMT_COLS Then
+'''''                    wsO.Cells(oDataRow, colCmtStart + 1 + cmtIdx).Value = cmtVal
+'''''                End If
+'''''            End If
+'''''
+'''''        Next scanRow
+'''''    Next r
+'''''
+'''''    ' =========================================================================
+'''''    ' PASS 3 — Duplicate detection
+'''''    '
+'''''    ' Two orders are duplicates if ALL key fields match AND at least one
+'''''    ' size column is non-empty in both (overlapping sizes).
+'''''    '
+'''''    ' Key fields: ORG(C=3), VAR(D=4), TM(E=5), GR(F=6), BRAND(G=7),
+'''''    '             PACK(H=8), INV(I=9)
+'''''    ' BATCH NR is intentionally excluded: real duplicates are cross-week
+'''''    ' carryovers and will always have different batch numbers.
+'''''    '
+'''''    ' "Same key, no size overlap" = intentional split (e.g. Canada orders
+'''''    ' for sizes 1-3, size 4, size 5 separately). DUP_OF stays 0.
+'''''    ' =========================================================================
+'''''    Const COL_ORG   As Long = 3
+'''''    Const COL_VAR   As Long = 4
+'''''    Const COL_TM    As Long = 5
+'''''    Const COL_GR    As Long = 6
+'''''    Const COL_BRAND As Long = 7
+'''''    Const COL_PACK  As Long = 8
+'''''    Const COL_INV   As Long = 9
+'''''
+'''''    Dim rOuter As Long, rInner As Long
+'''''    Dim outerSh As Long, innerSh As Long
+'''''
+'''''    For rOuter = 2 To totalOrders
+'''''        outerSh = rOuter + 1
+'''''        For rInner = 1 To rOuter - 1
+'''''            innerSh = rInner + 1
+'''''            If wsO.Cells(outerSh, COL_ORG).Value = wsO.Cells(innerSh, COL_ORG).Value And _
+'''''               wsO.Cells(outerSh, COL_VAR).Value = wsO.Cells(innerSh, COL_VAR).Value And _
+'''''               wsO.Cells(outerSh, COL_TM).Value = wsO.Cells(innerSh, COL_TM).Value And _
+'''''               wsO.Cells(outerSh, COL_GR).Value = wsO.Cells(innerSh, COL_GR).Value And _
+'''''               wsO.Cells(outerSh, COL_BRAND).Value = wsO.Cells(innerSh, COL_BRAND).Value And _
+'''''               wsO.Cells(outerSh, COL_PACK).Value = wsO.Cells(innerSh, COL_PACK).Value And _
+'''''               wsO.Cells(outerSh, COL_INV).Value = wsO.Cells(innerSh, COL_INV).Value Then
+'''''                Dim szCol As Long, hasOverlap As Boolean: hasOverlap = False
+'''''                For szCol = colFirstSz To colLastSz
+'''''                    If wsO.Cells(outerSh, szCol).Value <> "" And _
+'''''                       wsO.Cells(innerSh, szCol).Value <> "" Then
+'''''                        hasOverlap = True: Exit For
+'''''                    End If
+'''''                Next szCol
+'''''                If hasOverlap Then
+'''''                    wsO.Cells(outerSh, colDup).Value = innerSh
+'''''                    Exit For
+'''''                End If
+'''''            End If
+'''''        Next rInner
+'''''    Next rOuter
+'''''
+'''''    ' =========================================================================
+'''''    ' PASS 4 — Formatting
+'''''    ' =========================================================================
+'''''    With wsO.Rows(1)
+'''''        .Font.Bold = True
+'''''        .Interior.Color = RGB(189, 215, 238)
+'''''    End With
+'''''    wsO.Range(wsO.Cells(2, colDup), wsO.Cells(totalOrders + 1, colDup)).Interior.Color = RGB(255, 255, 200)
+'''''    For r = 1 To totalOrders
+'''''        If wsO.Cells(r + 1, colDup).Value > 0 Then
+'''''            wsO.Range(wsO.Cells(r + 1, 1), wsO.Cells(r + 1, colTot)).Interior.Color = RGB(255, 220, 180)
+'''''        End If
+'''''    Next r
+'''''    wsO.Range(wsO.Cells(1, colCmtStart), _
+'''''              wsO.Cells(1, colCmtStart + 1 + MAX_CMT_COLS)).Interior.Color = RGB(226, 239, 218)
+'''''    wsO.Activate
+'''''    wsO.Range("A2").Select
+'''''    ActiveWindow.FreezePanes = True
+'''''    wsO.Range(wsO.Cells(1, 1), wsO.Cells(1, 16)).EntireColumn.AutoFit
+'''''    wsO.Columns(colDup).AutoFit
+'''''    wsO.Columns(colCmtStart).ColumnWidth = 6
+'''''    wsO.Columns(colCmtStart + 1).ColumnWidth = 8
+'''''
+'''''End Sub
+'''''
+'''''
+'''''' =============================================================================
+'''''' GET_OORSIG_COMMENTS
+'''''' Returns all comment lines for an Oorsig row joined by " | ".
+'''''' This format is what IsCountAsOrdered() expects.
+'''''' =============================================================================
+'''''Private Function Get_Oorsig_Comments(wsO As Worksheet, _
+'''''                                      oDataRow As Long, _
+'''''                                      colCmtStart As Long) As String
+'''''    Dim parts() As String
+'''''    ReDim parts(1 To MAX_CMT_COLS)
+'''''    Dim count As Long: count = 0
+'''''    Dim ci As Long, val As String
+'''''    For ci = 1 To MAX_CMT_COLS
+'''''        val = Trim(CStr(wsO.Cells(oDataRow, colCmtStart + 1 + ci).Value))
+'''''        If val <> "" And val <> "0" Then
+'''''            count = count + 1
+'''''            parts(count) = val
+'''''        End If
+'''''    Next ci
+'''''    If count = 0 Then
+'''''        Get_Oorsig_Comments = ""
+'''''    Else
+'''''        ReDim Preserve parts(1 To count)
+'''''        Get_Oorsig_Comments = Join(parts, " | ")
+'''''    End If
+'''''End Function
+'''''
+'''''
+'''''' =============================================================================
+'''''' SETUP_STUFF  (rewritten to use Oorsig as data source)
+'''''' Builds the "Vordering" progress-tracking sheet.
+''''''
+'''''' v2 CORRECTION: IsNumeric() guard on N and O columns before using them for
+'''''' carton count derivation. For M="S" rows, column O may be a formula string
+'''''' ("=+Z90/88") rather than a number when pasted as values.
+'''''' =============================================================================
+'''''Public Sub Setup_Stuff_R(control As IRibbonControl)
+'''''    Setup_Stuff
+'''''End Sub
+'''''
+'''''Public Sub Setup_Stuff()
+'''''    InitiateConstants
+'''''
+'''''    With UserForm1
+'''''        .Width = 220: .Frame1.Width = 200: .Height = 98
+'''''        .StartUpPosition = 2: .Caption = "Progress Bar"
+'''''        .Label1.Caption = "0% Completed": .Label2.Caption = ""
+'''''        .Label3.Caption = "Setting things up..."
+'''''        .Label2.Width = 0
+'''''        .Label2.Height = .Frame1.Height - 4
+'''''        .Label2.BackColor = vbMagenta: .Frame1.Caption = ""
+'''''    End With
+'''''
+'''''    oName = "Oorsig"
+'''''    shName = "Vordering"
+'''''    pName = "Pakplan"
+'''''
+'''''    If ThisWorkbook.Sheets("Data").Range("U1").Value = "" Then ThisWorkbook.Sheets("Data").Range("U1").Value = "All"
+'''''    If ThisWorkbook.Sheets("Data").Range("V1").Value = "" Then ThisWorkbook.Sheets("Data").Range("V1").Value = "OFF"
+'''''
+'''''    Dim answer As String: answer = "6"
+'''''    If Not sheetExists(shName) Then
+'''''        ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.count)).Name = shName
+'''''    Else
+'''''        ThisWorkbook.Sheets(shName).Select
+'''''        answer = MsgBox("Do you wish to setup the " & shName & " sheet?", vbQuestion + vbYesNo, "User Response")
+'''''    End If
+'''''    If answer <> "6" Then Exit Sub
+'''''    If Not sheetExists(oName) Then
+'''''        ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.count)).Name = oName
+'''''    End If
+'''''
+'''''    UserForm1.Show (False)
+'''''    OptimizeVBA (True)
+'''''
+'''''    ' STEP 1 — Build the flat list
+'''''    UserForm1.Label3.Caption = "Building Oorsig flat list..."
+'''''    DoEvents
+'''''    Build_Oorsig
+'''''
+'''''    ' STEP 2 — Locate layout references
+'''''    Dim wsO  As Worksheet: Set wsO = ThisWorkbook.Worksheets(oName)
+'''''    Dim wsV  As Worksheet: Set wsV = ThisWorkbook.Worksheets(shName)
+'''''    Dim wsP  As Worksheet: Set wsP = ThisWorkbook.Worksheets(pName)
+'''''
+'''''    Dim headerRow As Long
+'''''    headerRow = wsP.Cells.Find("MAR*", SearchOrder:=xlByRows, SearchDirection:=xlNext).Row
+'''''
+'''''    Dim rTotCell As Range
+'''''    Set rTotCell = wsO.Range("Q1:AZ1").Find("TOT*", , xlValues, xlWhole)
+'''''    If rTotCell Is Nothing Then
+'''''        MsgBox "Could not find TOTAL column in Oorsig row 1.", vbExclamation
+'''''        OptimizeVBA (False): UserForm1.Hide: Exit Sub
+'''''    End If
+'''''    Dim colTot      As Long: colTot = rTotCell.Column
+'''''    Dim colDup      As Long: colDup = colTot + 1
+'''''    Dim colCmtStart As Long: colCmtStart = colDup + 1 + GAP_COLS
+'''''
+'''''    Dim sColtot    As String: sColtot = charCheck(colTot + 64)
+'''''    Dim sColfinnum As String: sColfinnum = charCheck(colTot - 1 + 64)
+'''''    Dim sColterm   As String: sColterm = charCheck(colTot + 2 + 64)
+'''''    Dim sColcommV  As String: sColcommV = charCheck(colTot + 1 + 64)
+'''''
+'''''    Dim totalOrders As Long
+'''''    totalOrders = wsO.Cells(wsO.Rows.count, 1).End(xlUp).Row - 1
+'''''
+'''''    ' STEP 3 — Clear Vordering and copy header rows
+'''''    wsV.Rows(2 & ":" & wsV.Rows.count).Delete
+'''''    wsP.Cells(1, "A").EntireRow.Copy Destination:=wsV.Range("A" & (startline - 2))
+'''''    wsP.Range("A2:AZ2").Copy
+'''''    wsV.Range("A2:AZ2").PasteSpecial xlPasteColumnWidths
+'''''    wsP.Cells(headerRow, "A").EntireRow.Copy Destination:=wsV.Range("A" & startline)
+'''''    wsV.Range("C:" & sColtot).HorizontalAlignment = xlCenter
+'''''    wsV.Range("Q:" & sColtot).NumberFormat = "0;-0;"
+'''''    wsV.Range(sColtot & (startline - 2)).Font.Color = vbWhite
+'''''    wsV.Range(sColtot & (startline - 2)).Font.Size = 1
+'''''
+'''''    ' STEP 4 — Main loop
+'''''    Const block As Integer = 6
+'''''    Dim r         As Long, oSheetRow As Long, vRow As Long, curRow As Long
+'''''    Dim cartonCount As Long, commentCheck As String
+'''''    Dim colvar As String, sForm As String
+'''''    Dim sCol1 As String, sCol2 As String, sCol3 As String
+'''''    Dim totPerc As Integer: totPerc = 0
+'''''    Dim m As Long, l As Long, pRow As Long
+'''''
+'''''    For r = 1 To totalOrders
+'''''        oSheetRow = r + 1
+'''''        vRow = startline + (r - 1) * block
+'''''
+'''''        UserForm1.Label2.BackColor = GetRainbowColor(CDbl(r))
+'''''        totPerc = Round((r / totalOrders) * 100, 0)
+'''''        If totPerc > 100 Then totPerc = 100
+'''''        UserForm1.Label1.Caption = Str(totPerc) & "% Completed"
+'''''        UserForm1.Label2.Width = totPerc * 2
+'''''        UserForm1.Label3.Caption = "Setting things up..."
+'''''        DoEvents
+'''''
+'''''        ' Copy order row values from Oorsig
+'''''        wsO.Range(wsO.Cells(oSheetRow, 1), wsO.Cells(oSheetRow, colTot)).Copy
+'''''        wsV.Cells(vRow, 1).PasteSpecial Paste:=xlPasteValues
+'''''        Application.CutCopyMode = False
+'''''
+'''''        ' Top border for this block
+'''''        With wsV.Range("A" & vRow & ":" & sColterm & vRow).Borders(xlEdgeTop)
+'''''            .LineStyle = xlContinuous: .Color = vbBlack: .Weight = xlMedium
+'''''        End With
+'''''
+'''''        ' Sub-row labels
+'''''        wsV.Cells(vRow + 1, "L").Value = "Pallets Needed"
+'''''        wsV.Cells(vRow + 2, "L").Value = "Pallets Outstanding"
+'''''        wsV.Cells(vRow + 3, "L").Value = "Pallets in Stock"
+'''''        wsV.Cells(vRow + 4, "L").Value = "Pallets Overpacked"
+'''''        wsV.Cells(vRow + 5, "L").Value = "Pallets Dispatched"
+'''''
+'''''        ' Copy TERM text from Pakplan using PAK_ROW as anchor
+'''''        Dim pakSrcRow  As Long: pakSrcRow = wsO.Cells(oSheetRow, colCmtStart + 1).Value
+'''''        Dim colTermPak As Long: colTermPak = colTot + 2
+'''''        Dim finalRow   As Long: finalRow = wsP.Cells(wsP.Rows.count, 1).End(xlUp).Row
+'''''        Dim termCount  As Long: termCount = 0
+'''''        Dim termScan   As Long
+'''''
+'''''        For termScan = pakSrcRow To finalRow
+'''''            If termScan > pakSrcRow Then
+'''''                Dim mchk As String: mchk = Trim(CStr(wsP.Cells(termScan, "M").Value))
+'''''                If mchk = "H" Or mchk = "S" Then Exit For
+'''''                If UCase(Trim(CStr(wsP.Cells(termScan, 1).Value))) = "GRAND TOTAL" Then Exit For
+'''''                If wsP.Cells(termScan, colTermPak).Borders(xlEdgeTop).LineStyle <> xlNone Then Exit For
+'''''            End If
+'''''            Dim termVal As String: termVal = CStr(wsP.Cells(termScan, colTermPak).Value)
+'''''            If Len(termVal) > 2 Then
+'''''                wsV.Cells(vRow + 1 + termCount, colTot + 2).Value = termVal
+'''''                wsV.Cells(vRow + 1 + termCount, colTot + 2).Font.Underline = xlUnderlineStyleNone
+'''''                wsV.Cells(vRow + 1 + termCount, colTot + 2).Font.Bold = False
+'''''                wsV.Cells(vRow + 1 + termCount, colTot + 2).HorizontalAlignment = xlLeft
+'''''                termCount = termCount + 1
+'''''            End If
+'''''        Next termScan
+'''''
+'''''        ' Sub-row formatting
+'''''        For l = 1 To 5
+'''''            With wsV.Range("L" & (vRow + l) & ":O" & (vRow + l))
+'''''                .HorizontalAlignment = xlCenterAcrossSelection: .VerticalAlignment = xlCenter
+'''''            End With
+'''''            With wsV.Range("A" & (vRow + l) & ":" & sColterm & (vRow + l)).Borders
+'''''                .LineStyle = xlContinuous: .Color = vbBlack: .Weight = xlThin
+'''''            End With
+'''''            wsV.Range("A" & (vRow + l) & ":" & sColterm & (vRow + l)).Interior.Color = RGB(210, 210, 210)
+'''''        Next l
+'''''
+'''''        ' Column P formulas (total pallets per sub-row)
+'''''        For l = 1 To 5
+'''''            pRow = vRow + l
+'''''            wsV.Cells(pRow, "P").FormatConditions.Delete
+'''''            If l <> 4 Then
+'''''                wsV.Cells(pRow, "P").Formula = "=SUM(Q" & pRow & ":" & sColfinnum & pRow & ")"
+'''''            Else
+'''''                wsV.Cells(pRow, "P").Formula = _
+'''''                    "=IF(COUNTIF(" & sColcommV & (vRow + 1) & ":" & sColcommV & (vRow + 6) & "," & _
+'''''                    Chr(34) & "*AS ORDERED*" & Chr(34) & ")>0," & _
+'''''                    "SUM(Q" & pRow & ":" & sColfinnum & pRow & ")," & _
+'''''                    "IF(P" & (vRow + 2) & ">0,0,(-1)*P" & (vRow + 2) & "))"
+'''''            End If
+'''''            If l = 2 Or l = 4 Then
+'''''                CondFormAddRule wsV.Cells(pRow, "P"), 3, RGB(70, 170, 100)
+'''''                CondFormAddRule wsV.Cells(pRow, "P"), 6, RGB(230, 80, 80)
+'''''                If l = 4 Then
+'''''                    CondFormAddRule wsV.Cells(pRow, "P"), 5, RGB(230, 80, 80)
+'''''                Else
+'''''                    CondFormAddRule wsV.Cells(pRow, "P"), 5, vbYellow
+'''''                End If
+'''''            End If
+'''''        Next l
+'''''
+'''''        ' --- Carton count ---
+'''''        ' CORRECTION (D): Guard with IsNumeric before using N and O.
+'''''        ' For M="S" rows, column O stores a formula string rather than a number
+'''''        ' when cells are copied as values. Without this guard the derivation
+'''''        ' would use a non-numeric value and produce zero or an error.
+'''''        Dim nVal As Variant: nVal = wsV.Cells(vRow, "N").Value
+'''''        Dim oVal As Variant: oVal = wsV.Cells(vRow, "O").Value
+'''''        cartonCount = 0
+'''''
+'''''        If IsNumeric(nVal) And IsNumeric(oVal) Then
+'''''            If (CDbl(nVal) + CDbl(oVal)) > 0 Then
+'''''                cartonCount = CLng(wsV.Cells(vRow, sColtot).Value / (CDbl(nVal) + CDbl(oVal)))
+'''''            End If
+'''''        End If
+'''''
+'''''        If cartonCount = 0 Then
+'''''            If wsV.Cells(vRow, "H").Value = "Z10D" Or wsV.Cells(vRow, "H").Value = "A06D" Then
+'''''                cartonCount = 95
+'''''            ElseIf wsV.Cells(vRow, "M").Value = "H" Then
+'''''                Select Case wsV.Cells(vRow, "H").Value
+'''''                    Case "A15C":              cartonCount = 80
+'''''                    Case "E10D", "E10D/D10D": cartonCount = 104
+'''''                    Case "D10D":              cartonCount = 112
+'''''                    Case "E15D":              cartonCount = 65
+'''''                    Case "D15D", "D15C":      cartonCount = 70
+'''''                    Case "A07D":              cartonCount = 140
+'''''                    Case "G15C":              cartonCount = 50
+'''''                End Select
+'''''            Else
+'''''                ' M = "S" (Standard pallet)
+'''''                Select Case wsV.Cells(vRow, "H").Value
+'''''                    Case "A15C":              cartonCount = 70
+'''''                    Case "E10D", "E10D/D10D": cartonCount = 88
+'''''                    Case "D10D":              cartonCount = 96
+'''''                    Case "E15D":              cartonCount = 55
+'''''                    Case "D15D", "D15C":      cartonCount = 60
+'''''                    Case "A07D":              cartonCount = 120
+'''''                    Case "G15C":              cartonCount = 45
+'''''                End Select
+'''''            End If
+'''''        End If
+'''''
+'''''        wsV.Cells(vRow + 5, colTot + 2).Value = cartonCount
+'''''
+'''''        ' Comments from Oorsig; DUP_OF flag stored for Input_Stuff
+'''''        commentCheck = Get_Oorsig_Comments(wsO, oSheetRow, colCmtStart)
+'''''        wsV.Cells(vRow, colTot + 3).Value = wsO.Cells(oSheetRow, colDup).Value
+'''''
+'''''        ' Per-size column formulas
+'''''        Dim firstSzAsc As Long: firstSzAsc = 17 + 64
+'''''        For m = firstSzAsc To (colTot - 1 + 64)
+'''''            colvar = charCheck(m)
+'''''            curRow = vRow + 1
+'''''
+'''''            If InStr(1, CStr(wsV.Cells(vRow, colvar).Value), "*") = 0 Then
+'''''                wsV.Range(colvar & curRow).Formula = "=IFERROR(" & colvar & vRow & "/" & cartonCount & ",0)"
+'''''            Else
+'''''                wsV.Range(colvar & curRow).Formula = _
+'''''                    "=IFERROR(" & colvar & (curRow + 2) & "+" & colvar & (curRow + 4) & ",0)"
+'''''            End If
+'''''
+'''''            wsV.Range(colvar & (curRow + 1)).Formula = _
+'''''                "=IFERROR(" & colvar & curRow & "-(" & _
+'''''                colvar & (curRow + 2) & "+" & colvar & (curRow + 4) & "),0)"
+'''''
+'''''            If IsCountAsOrdered(wsV.Range(colvar & startline).Formula, commentCheck) Then
+'''''                wsV.Range(colvar & (curRow + 3)).Formula = _
+'''''                    "=IF(" & colvar & (curRow + 1) & "<0,-" & colvar & (curRow + 1) & "," & _
+'''''                    "IF((" & colvar & (curRow + 2) & "+" & colvar & (curRow + 4) & ")-" & colvar & curRow & ">0," & _
+'''''                    "(" & colvar & (curRow + 2) & "+" & colvar & (curRow + 4) & ")-" & colvar & curRow & ",0))"
+'''''            Else
+'''''                wsV.Range(colvar & (curRow + 3)).Formula = _
+'''''                    "=IF(($P" & (curRow + 2) & "+$P" & (curRow + 4) & ")>$P" & curRow & "," & _
+'''''                    "IF((" & colvar & (curRow + 2) & "+" & colvar & (curRow + 4) & ")-" & colvar & curRow & ">0," & _
+'''''                    "(" & colvar & (curRow + 2) & "+" & colvar & (curRow + 4) & ")-" & colvar & curRow & ",0),0)"
+'''''            End If
+'''''        Next m
+'''''
+'''''        ' Summary SUMIFS (last order in each NAME/consignment group)
+'''''        Dim isLastInGroup As Boolean: isLastInGroup = (r = totalOrders)
+'''''        If Not isLastInGroup Then
+'''''            ' Col B = NAME (consignment name); change signals end of group
+'''''            If wsO.Cells(oSheetRow + 1, 2).Value <> wsO.Cells(oSheetRow, 2).Value Then
+'''''                isLastInGroup = True
+'''''            End If
+'''''        End If
+'''''        If isLastInGroup Then
+'''''            Dim grpEnd As Long: grpEnd = vRow + 5
+'''''            sCol2 = charCheck(firstSzAsc - 2): sCol3 = charCheck(firstSzAsc - 3): sCol1 = charCheck(firstSzAsc - 1)
+'''''            wsV.Range(sCol2 & vRow).Formula = "=SUMIFS(" & sCol2 & "$1:" & sCol2 & "$" & grpEnd & ",$" & sColtot & "$1:$" & sColtot & "$" & grpEnd & "," & Chr(34) & ">0" & Chr(34) & ")"
+'''''            wsV.Range(sCol3 & vRow).Formula = "=SUMIFS(" & sCol3 & "$1:" & sCol3 & "$" & grpEnd & ",$" & sColtot & "$1:$" & sColtot & "$" & grpEnd & "," & Chr(34) & ">0" & Chr(34) & ")"
+'''''            wsV.Range(sColtot & vRow).Formula = "=SUMIFS(" & sColtot & "$1:" & sColtot & "$" & grpEnd & ",$" & sColtot & "$1:$" & sColtot & "$" & grpEnd & "," & Chr(34) & ">0" & Chr(34) & ")"
+'''''            wsV.Range(sCol1 & (vRow + 4)).Formula = "=SUMIFS(" & sCol1 & "$1:" & sCol1 & "$" & grpEnd & ",$L$1:$L$" & grpEnd & ",$L" & (vRow + 4 + 3) & ")"
+'''''        End If
+'''''
+'''''    Next r
+'''''
+'''''    ' GRAND TOTAL ROW
+'''''    Dim gtRow As Long: gtRow = startline + totalOrders * block
+'''''    Dim gtEnd As Long: gtEnd = gtRow - 1
+'''''
+'''''    wsV.Cells(gtRow, "A").Value = "GRAND TOTAL"
+'''''    wsV.Cells(gtRow + 1, "L").Value = "Pallets Needed"
+'''''    wsV.Cells(gtRow + 2, "L").Value = "Pallets Outstanding"
+'''''    wsV.Cells(gtRow + 3, "L").Value = "Pallets in Stock"
+'''''    wsV.Cells(gtRow + 4, "L").Value = "Pallets Overpacked"
+'''''    wsV.Cells(gtRow + 5, "L").Value = "Pallets Dispatched"
+'''''
+'''''    With wsV.Range("A" & gtRow & ":" & sColterm & gtRow).Borders(xlEdgeTop)
+'''''        .LineStyle = xlContinuous: .Color = vbBlack: .Weight = xlMedium
+'''''    End With
+'''''    For l = 1 To 5
+'''''        With wsV.Range("L" & (gtRow + l) & ":O" & (gtRow + l))
+'''''            .HorizontalAlignment = xlCenterAcrossSelection: .VerticalAlignment = xlCenter
+'''''        End With
+'''''        With wsV.Range("A" & (gtRow + l) & ":" & sColterm & (gtRow + l)).Borders
+'''''            .LineStyle = xlContinuous: .Color = vbBlack: .Weight = xlThin
+'''''        End With
+'''''        wsV.Range("A" & (gtRow + l) & ":" & sColterm & (gtRow + l)).Font.Bold = True
+'''''        wsV.Range("A" & (gtRow + l) & ":" & sColterm & (gtRow + l)).Interior.Color = RGB(165, 175, 200)
+'''''    Next l
+'''''
+'''''    Dim firstSzAsc2 As Long: firstSzAsc2 = 17 + 64
+'''''    For m = firstSzAsc2 To (colTot - 1 + 64)
+'''''        colvar = charCheck(m)
+'''''        For l = 1 To 5
+'''''            wsV.Range(colvar & (gtRow + l)).Formula = _
+'''''                "=SUMIFS(" & colvar & "$1:" & colvar & "$" & gtEnd & ",$L$1:$L$" & gtEnd & ",$L" & (gtRow + l) & ")"
+'''''        Next l
+'''''        wsV.Range(colvar & gtRow).Formula = _
+'''''            "=SUMIFS(" & colvar & "$1:" & colvar & "$" & gtEnd & ",$" & sColtot & "$1:$" & sColtot & "$" & gtEnd & "," & Chr(34) & ">0" & Chr(34) & ")"
+'''''    Next m
+'''''    sCol2 = charCheck(firstSzAsc2 - 2): sCol3 = charCheck(firstSzAsc2 - 3): sCol1 = charCheck(firstSzAsc2 - 1)
+'''''    wsV.Range(sCol2 & gtRow).Formula = "=SUMIFS(" & sCol2 & "$1:" & sCol2 & "$" & gtEnd & ",$" & sColtot & "$1:$" & sColtot & "$" & gtEnd & "," & Chr(34) & ">0" & Chr(34) & ")"
+'''''    wsV.Range(sCol3 & gtRow).Formula = "=SUMIFS(" & sCol3 & "$1:" & sCol3 & "$" & gtEnd & ",$" & sColtot & "$1:$" & sColtot & "$" & gtEnd & "," & Chr(34) & ">0" & Chr(34) & ")"
+'''''    wsV.Range(sColtot & gtRow).Formula = "=SUMIFS(" & sColtot & "$1:" & sColtot & "$" & gtEnd & ",$" & sColtot & "$1:$" & sColtot & "$" & gtEnd & "," & Chr(34) & ">0" & Chr(34) & ")"
+'''''    wsV.Range(sCol1 & (gtRow + 4)).Formula = "=SUMIFS(" & sCol1 & "$1:" & sCol1 & "$" & gtEnd & ",$L$1:$L$" & gtEnd & ",$L" & (gtRow + 3) & ",$P$1:$P$" & gtEnd & "," & Chr(34) & ">0" & Chr(34) & ")"
+'''''    For l = 1 To 5
+'''''        If l <> 4 Then
+'''''            wsV.Cells(gtRow + l, "P").Formula = "=SUM(Q" & (gtRow + l) & ":" & sColfinnum & (gtRow + l) & ")"
+'''''        End If
+'''''    Next l
+'''''
+'''''    wsV.Rows("1:" & (gtRow + 5)).EntireRow.Hidden = False
+'''''    wsV.Range("P:P").NumberFormat = "General"
+'''''    ThisWorkbook.Sheets(shName).Select
+'''''    wsV.Visible = xlSheetVisible
+'''''    Application.ScreenUpdating = True
+'''''    UserForm1.Hide
+'''''    OptimizeVBA (False)
+'''''
+'''''End Sub
+'''''
+''''''====================================================================================================================================
+
+
+' =============================================================================
+' RIBBON WRAPPER: Setup_Stuff_R
+' Called by the Ribbon button. Delegates to Setup_Stuff.
+' =============================================================================
+Public Sub Setup_Stuff_R(control As IRibbonControl)
+    Setup_Stuff
+End Sub
+
+' =============================================================================
+' SETUP_STUFF
+' Builds the "Vordering" (progress tracking) sheet from the "Pakplan" source.
+'
+' WHAT IT DOES:
+'   1. Prompts the user if Vordering already exists (to confirm re-build).
+'   2. Copies the header rows from Pakplan to Vordering.
+'   3. For each packing line (rows where column M = "H" or "S"):
+'      - Copies the line from Pakplan.
+'      - Inserts 5 sub-rows: Pallets Needed/Outstanding/In Stock/Overpacked/Dispatched.
+'      - Calculates cartons-per-pallet based on pack type and carton size.
+'      - Writes formulas for each size column (SUM for totals, IFERROR for per-size).
+'      - Writes OVERPACK formulas (with or without "As Ordered" logic).
+'      - Adds conditional formatting (green/yellow/red) to key rows.
+'   4. Adds a GRAND TOTAL row at the bottom.
+'   5. Formats the sheet (borders, alignment, number format, row visibility).
+'
+' DEPENDENCIES:
+'   - "Pakplan" sheet must exist and contain data starting with a "MAR*" header row.
+'   - charCheck(), CondFormAddRule(), IsCountAsOrdered(), sheetExists()
+'   - UserForm1 for progress display
+'   - OptimizeVBA() to speed up processing
+'
+' KEY VARIABLES:
+'   block       = 6: each Pakplan line expands to a 6-row block in Vordering
+'   cartonCount = estimated cartons per pallet (varies by pack type and carton size)
+'   totCol      = column index of the "TOTAL" column (module-level, set here)
+'   stdcol      = column index of the "STD" column in Pakplan
+' =============================================================================
+Public Sub Setup_Stuff()
+    InitiateConstants
+
+    ' --- Configure progress bar UserForm ---
+    UserForm1.Width = 220
+    UserForm1.Frame1.Width = 200
+    UserForm1.Height = 98
+    UserForm1.StartUpPosition = 2
+    UserForm1.Caption = "Progress Bar"
+    UserForm1.Label1.Caption = "0% Completed"
+    UserForm1.Label2.Caption = ""
+    UserForm1.Label3.Caption = "Setting things up..."
+    UserForm1.Label2.Width = 0
+    UserForm1.Label2.Height = UserForm1.Frame1.Height - 4
+    UserForm1.Label2.BackColor = vbMagenta
+    UserForm1.Frame1.Caption = ""
+
+    Dim answer As String
+    shName = "Vordering"
+    pName = "Pakplan"
+    answer = "6"   ' "6" = vbYes
+
+    ' Ensure control cells on Data sheet are initialised
+    If ThisWorkbook.Sheets("Data").Range("U1").Value = "" Then ThisWorkbook.Sheets("Data").Range("U1").Value = "All"
+    If ThisWorkbook.Sheets("Data").Range("V1").Value = "" Then ThisWorkbook.Sheets("Data").Range("V1").Value = "OFF"
+
+    ' Create the Vordering sheet if it doesn't exist; otherwise ask the user
+    If Not sheetExists(shName) Then
+        ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count)).Name = shName
+        answer = "6"  ' Auto-proceed if sheet is new
+    Else
+        ThisWorkbook.Sheets(shName).Select
+        answer = MsgBox("Do you wish to setup the " & shName & " sheet?", vbQuestion + vbYesNo, "User Response")
+    End If
+
+    If answer = "6" Then   ' User said Yes (or sheet was newly created)
+        UserForm1.Show (False)
+        OptimizeVBA (True)
+
+        ' --- Clear existing data rows in Vordering (keep row 1 formatting) ---
+        ThisWorkbook.Worksheets(shName).Rows(2 & ":" & ThisWorkbook.Worksheets(pName).Rows.Count).Delete
+
+        ' --- Declare working variables ---
+        Dim FirstCell As Range, LastCell As Range
+        Dim rngTotalCol As Range, rngSTDCheck As Range
+        Dim curRow As Integer, curCol As Integer, finalRow As Integer
+        Dim h As Integer, i As Integer, j As Integer, k As Integer
+        Dim l As Integer, m As Integer, n As Integer
+        Dim block As Integer, cartonCount As Integer
+        Dim totPerc As Integer, stdcol As Integer
+        Dim colvar As String, commentCheck As String
+        Dim sColstd As String, sColtot As String, sColterm As String
+        Dim sColcomm As String, sColfinnum As String
+        Dim sCol1 As String, sCol2 As String, sCol3 As String
+
+        ' Find the extent of Pakplan data
+        Set LastCell = ThisWorkbook.Worksheets(pName).Cells.Find("*", SearchOrder:=xlByRows, SearchDirection:=xlPrevious)
+        Set FirstCell = ThisWorkbook.Worksheets(pName).Cells.Find("MAR*", SearchOrder:=xlByRows, SearchDirection:=xlNext)
+        finalRow = LastCell.Row
+
+
+
+        ' Initialise counters
+        commentCheck = ""
+        colvar = ""
+        curRow = 0: curCol = 0: block = 6: cartonCount = 0
+        totCol = 0: totPerc = 0
+        h = 0: i = 0: l = 0: k = 0: j = 0: m = 0
+
+        ' --- Locate or insert the BATCH NR column in Pakplan ---
+        ' The BATCH NR column should be immediately after the STD column.
+        ' If it's missing, insert it (needed for Mahela vs non-Mahela logic).
+        Set rngSTDCheck = Sheets(pName).Range("I" & FirstCell.Row & ":Z" & FirstCell.Row).Find("STD", , xlValues, xlWhole)
+        stdcol = rngSTDCheck.Column + 64
+        sColstd = charCheck(stdcol + 1)
+        If Not (UCase(Sheets(pName).Range(sColstd & FirstCell.Row).Value) Like "BATC*") Then
+            Sheets(pName).Range(sColstd & ":" & sColstd).EntireColumn.Insert
+            Sheets(pName).Range(sColstd & FirstCell.Row).Value = "BATCH NR"
+            Sheets(pName).Columns(sColstd).ColumnWidth = 6
+            Sheets(pName).Range(sColstd & FirstCell.Row).WrapText = True
+        End If
+
+        ' --- Copy header rows from Pakplan to Vordering ---
+        Sheets(pName).Cells(1, "A").EntireRow.Copy Destination:=Sheets(shName).Range("A" & 1).End(xlUp).Offset(startline - 3)
+        Sheets(pName).Range("A2:AZ2").Copy
+        Sheets(shName).Range("A2:AZ2").PasteSpecial xlPasteColumnWidths
+        Sheets(pName).Cells(FirstCell.Row, "A").EntireRow.Copy Destination:=Sheets(shName).Range("A" & 1).End(xlUp).Offset(startline - 1)
+
+        ' --- Find the TOTAL column in Vordering and derive related column references ---
+        Set rngTotalCol = Sheets(shName).Range("Q" & startline & ":AZ" & startline).Find("TOT*", , xlValues, xlWhole)
+        totCol = rngTotalCol.Column + 64
+        sColtot = charCheck(totCol)
+
+        ' Hide the TOTAL column header text (small white font) to reduce clutter
+        Sheets(shName).Range(sColtot & (startline - 2)).Font.Color = vbWhite
+        Sheets(shName).Range(sColtot & (startline - 2)).Font.Size = 1
+
+        ' Formatting for the data area
+        Sheets(shName).Range("C:" & sColtot).HorizontalAlignment = xlCenter
+        Sheets(shName).Range("Q:" & sColtot).NumberFormat = "0;-0;"  ' Suppress zeros
+
+        ' COMMENTS column = 1 after TOTAL; second-to-last count column = 1 before TOTAL
+        sColcomm = charCheck(totCol + 1)
+        sColfinnum = charCheck(totCol - 1)
+
+        ' =====================================================================
+        ' MAIN LOOP: Process each row of Pakplan
+        ' For each line where column M = "H" (High pallet) or "S" (Standard),
+        ' copy it to Vordering and insert 5 sub-rows beneath it.
+        ' =====================================================================
+        For i = (startline) To finalRow
+
+            ' j = calculated destination row offset in Vordering.
+            ' Each matching line expands into `block` (6) rows, and k counts
+            ' the non-matching (skipped) rows to subtract from the offset.
+            j = (i - (startline - 1)) * block - (k * block) - (block - startline)
+
+            ' Only process rows flagged as H (Half pallet) or S (Standard)
+            If (Sheets(pName).Cells(i, "M").Value = "H") Or (Sheets(pName).Cells(i, "M").Value = "S") Then
+
+                ' Copy the Pakplan row to Vordering at the calculated offset
+                Sheets(pName).Cells(i, "A").EntireRow.Copy Destination:=Sheets(shName).Range("A" & 1).End(xlUp).Offset(j)
+
+                ' Draw a top border above this line's block
+                sColterm = charCheck(totCol + 2)
+                With Sheets(shName).Range("A" & 1 & ":" & sColterm & 1).Offset(j).Borders(xlTop)
+                    .LineStyle = xlContinuous
+                    .Color = vbBlack
+                    .Weight = xlMedium
+                End With
+
+                ' Update progress bar
+                UserForm1.Label2.BackColor = GetRainbowColor(CDbl(i))
+                totPerc = Round((i / (finalRow - 6)) * 100, 0)
+                If totPerc > 100 Then totPerc = 100
+                UserForm1.Label1.Caption = Str(totPerc) + "% Completed"
+                UserForm1.Label2.Width = totPerc * 2
+                UserForm1.Label3.Caption = "Setting things up..."
+                DoEvents
+
+                ' --- Write sub-row labels in column L ---
+                With Sheets(shName).Cells(i, "L")
+                    .Offset(j - i + 2).Value = "Pallets Needed"
+                    .Offset(j - i + 3).Value = "Pallets Outstanding"
+                    .Offset(j - i + 4).Value = "Pallets in Stock"
+                    .Offset(j - i + 5).Value = "Pallets Overpacked"
+                    .Offset(j - i + 6).Value = "Pallets Dispatched"
+                End With
+
+                ' Record the actual Vordering row number for later formula building
+                curRow = Sheets(shName).Range("Q" & i).Offset(j - i + 1).Row
+
+                ' --- Apply formatting to the 5 sub-rows (rows 2-6 of each block) ---
+                For l = 2 To 6
+                    With Sheets(shName).Range("L" & i & ":O" & i).Offset(j - i + l)
+                        .HorizontalAlignment = xlCenterAcrossSelection
+                        .VerticalAlignment = xlCenter
+                    End With
+                    With Sheets(shName).Range("A" & i & ":" & sColterm & i).Offset(j - i + l).Borders
+                        .LineStyle = xlContinuous
+                        .Color = vbBlack
+                        .Weight = xlThin
+                    End With
+                    ' Grey background for all sub-rows
+                    Sheets(shName).Range("A" & i & ":" & sColterm & i).Offset(j - i + l).Interior.Color = RGB(210, 210, 210)
+                Next l
+
+                ' --- Copy TERM/COMMENTS text from Pakplan into Vordering sub-rows ---
+                ' Searches backwards from the current row to find where the
+                ' term text and comment text begin for this packing block.
+                n = i + 1
+                If Not Sheets(pName).Cells(n - 1, 1).Value = "GR* TOT*" Then
+                    Do
+                        n = n - 1
+                    Loop Until (Len(Sheets(pName).Cells(n, (totCol - 64 + 2))) > 2) Or _
+                               (Sheets(pName).Cells(n, (totCol - 64 + 1)).Borders(xlEdgeTop).LineStyle <> xlNone)
+                    ' Count how many term rows exist for this block
+                    Dim counter As Integer
+                    counter = 0
+                    Do
+                        counter = counter + 1
+                    Loop Until (Len(Sheets(pName).Cells(n + counter, (totCol - 64 + 2)).Value) > 2) Or _
+                               (Sheets(pName).Cells(n + counter, (totCol - 64 + 1)).Borders(xlEdgeTop).LineStyle <> xlNone) Or _
+                               (Sheets(pName).Cells(n + counter, 1).Value = "GRAND TOTAL") Or _
+                               (counter > finalRow)
+                    counter = counter - 1
+                    ' Copy the term text rows
+                    For l = 0 To counter
+                        Sheets(shName).Cells(i, (totCol - 64 + 1)).Offset(j - i + l + 1) = Sheets(pName).Cells(n + l, (totCol - 64 + 1))
+                        Sheets(shName).Cells(i, (totCol - 64 + 1)).Offset(j - i + l + 1).Font.Underline = xlUnderlineStyleNone
+                        Sheets(shName).Cells(i, (totCol - 64 + 1)).Offset(j - i + l + 1).Font.Bold = False
+                        Sheets(shName).Cells(i, (totCol - 64 + 1)).Offset(j - i + l + 1).HorizontalAlignment = xlLeft
+                    Next l
+                End If
+
+                ' --- Write SUM formulas into column P (total pallets per sub-row) ---
+                ' Row 2 = Pallets Needed:    SUM of all size columns in that row
+                ' Row 3 = Pallets Outstanding: same
+                ' Row 4 = Pallets in Stock:   same
+                ' Row 5 = Pallets Overpacked: IF "As Ordered" in comments -> special formula
+                ' Row 6 = Pallets Dispatched: same as others
+                For l = 2 To 6
+                    curRow = Sheets(shName).Range("P" & i).Offset(j - i + l).Row
+                    Sheets(shName).Range("P" & i).Offset(j - i + l).FormatConditions.Delete
+
+                    If l <> 5 Then
+                        ' Standard: sum all size columns for this row
+                        Sheets(shName).Range("P" & i).Offset(j - i + l).Formula = _
+                            "=SUM(Q" & curRow & ":" & sColfinnum & curRow & ")"
+                    Else
+                        ' Pallets Overpacked: check if "AS ORDERED" appears in comments
+                        ' If so, sum directly; otherwise derive from "Pallets Needed - Pallets Dispatched"
+                        Sheets(shName).Range("P" & i).Offset(j - i + l).Formula = _
+                            "=IF(COUNTIF(" & sColcomm & (curRow - 4) & ":" & sColcomm & (curRow + 1) & "," & Chr(34) & "*AS ORDERED*" & Chr(34) & ")>0," & _
+                            "SUM(Q" & curRow & ":" & sColfinnum & curRow & ")," & _
+                            "IF(P" & (curRow - 2) & ">0,0,(-1)*P" & (curRow - 2) & "))"
+                    End If
+
+                    ' Conditional formatting on Outstanding (l=3) and Overpacked (l=5)
+                    If l = 3 Or l = 5 Then
+                        CondFormAddRule Range("P" & i).Offset(j - i + l), 3, RGB(70, 170, 100)   ' = 0: green
+                        CondFormAddRule Range("P" & i).Offset(j - i + l), 6, RGB(230, 80, 80)    ' < 0: red
+                        If l = 5 Then
+                            CondFormAddRule Range("P" & i).Offset(j - i + l), 5, RGB(230, 80, 80) ' > 0: red (overpack)
+                        Else
+                            CondFormAddRule Range("P" & i).Offset(j - i + l), 5, vbYellow         ' > 0: yellow (still outstanding)
+                        End If
+                    End If
+                Next l
+
+                ' --- Calculate cartons per pallet for this line ---
+                ' Preference order:
+                '   1. Calculate from N+O columns (pallet dimensions)
+                '   2. Hardcoded for specific pack types (Z10D, A06D)
+                '   3. Lookup table by carton code, split by H (high) vs S (standard)
+                curRow = Sheets(shName).Range("Q" & i).Offset(j - i + 2).Row
+
+                If ((Sheets(shName).Cells(curRow - 1, "N").Value + Sheets(shName).Cells(curRow - 1, "O").Value) > 0) And _
+                   (InStr(1, Sheets(shName).Cells(curRow - 1, "N").Value, "*") = 0) And _
+                   (InStr(1, Sheets(shName).Cells(curRow - 1, "O").Value, "*") = 0) Then
+                    ' Use pallet dimension data if available and not asterisked
+                    cartonCount = (Sheets(shName).Cells(curRow - 1, sColtot).Value) / _
+                                  (Sheets(shName).Cells(curRow - 1, "N").Value + Sheets(shName).Cells(curRow - 1, "O").Value)
+                Else
+                    If Sheets(shName).Cells(curRow - 1, "H").Value = "Z10D" Or _
+                       Sheets(shName).Cells(curRow - 1, "H").Value = "A06D" Then
+                        ' Special carton types always get 95
+                        cartonCount = 95
+                    Else
+                        ' Look up by carton code. "H" = High pallet, other = standard pallet.
+                        If Sheets(shName).Cells(curRow - 1, "M").Value = "H" Then
+                            ' High pallet carton counts
+                            Select Case Sheets(shName).Cells(curRow - 1, "H").Value
+                                Case "A15C":         cartonCount = 80
+                                Case "E10D", "E10D/D10D": cartonCount = 104
+                                Case "D10D":         cartonCount = 112
+                                Case "E15D", "E15C": cartonCount = 65
+                                Case "D15D", "D15C": cartonCount = 70
+                                Case "A07D":         cartonCount = 140
+                                Case "G15C":         cartonCount = 50
+                            End Select
+                        Else
+                            ' Standard pallet carton counts
+                            Select Case Sheets(shName).Cells(curRow - 1, "H").Value
+                                Case "A15C":         cartonCount = 70
+                                Case "E10D", "E10D/D10D": cartonCount = 88
+                                Case "D10D":         cartonCount = 96
+                                Case "E15D", "E15C": cartonCount = 55
+                                Case "D15D", "D15C": cartonCount = 60
+                                Case "A07D":         cartonCount = 120
+                                Case "G15C":         cartonCount = 45
+                            End Select
+                        End If
+                    End If
+                End If
+
+                ' --- Collect all comment text for this block (for IsCountAsOrdered check) ---
+                commentCheck = ""
+                For h = 1 To 6
+                    commentCheck = commentCheck + Sheets(shName).Range(sColcomm & i).Offset(j - i + h).Formula
+                Next h
+
+                ' --- Write per-size formulas for each size column ---
+                ' Iterates from the first size column (curCol) to the last (totCol-1).
+                curCol = Sheets(shName).Range("Q" & i).Offset(j - i + 2).Column + 64
+
+                For m = curCol To (totCol - 1)
+                    colvar = charCheck(m)
+                    curRow = Sheets(shName).Range("Q" & i).Offset(j - i + 2).Row
+
+                    ' Store cartons-per-pallet in the TERM column of the Dispatched row
+                    Sheets(shName).Range(sColterm & i).Offset(j - i + 6).Formula = cartonCount
+
+                    ' Row 2 = Pallets Needed:
+                    '   If the Pakplan cell has an asterisk (*), this is a "split size"
+                    '   line - add Stock + Dispatched from other rows instead.
+                    If InStr(1, Sheets(shName).Range(colvar & i).Offset(j - i + 1).Value, "*") + InStr(1, Sheets(shName).Range(colvar & i).Offset(j - i + 1).Value, "L") + InStr(1, Sheets(shName).Range(colvar & i).Offset(j - i + 1).Value, "M") + InStr(1, Sheets(shName).Range(colvar & i).Offset(j - i + 1).Value, "S") <> 0 Then
+                        ' Asterisk = use stock+dispatched sum instead (5.4.11.1 fix)
+                        Sheets(shName).Range(colvar & i).Offset(j - i + 2).Formula = _
+                            "=IFERROR(" & colvar & (curRow + 2) & "+" & colvar & (curRow + 4) & ",0)"
+                    Else
+                        Sheets(shName).Range(colvar & i).Offset(j - i + 2).Formula = _
+                            "=IFERROR(" & colvar & (curRow - 1) & "/" & cartonCount & ",0)"
+                    End If
+
+                    ' Row 3 = Pallets Outstanding: Needed - (Stock + Dispatched)
+                    curRow = curRow + 1
+                    Sheets(shName).Range(colvar & i).Offset(j - i + 3).Formula = _
+                        "=IFERROR(" & colvar & (curRow - 1) & "-(" & colvar & (curRow + 1) & "+" & colvar & (curRow + 3) & "),0)"
+
+                    ' Row 5 = Pallets Overpacked: formula differs by "As Ordered" logic
+                    curRow = curRow + 2
+                    If IsCountAsOrdered(Sheets(shName).Range(colvar & startline).Formula, commentCheck) Then
+                        ' "As Ordered": overpack = how much above the ordered count was packed/dispatched
+                        Sheets(shName).Range(colvar & i).Offset(j - i + 5).Formula = _
+                            "=IF(" & colvar & (curRow - 2) & "<0,-" & colvar & (curRow - 2) & "," & _
+                            "IF((" & colvar & (curRow - 1) & "+" & colvar & (curRow + 1) & ")-" & colvar & (curRow - 3) & ">0," & _
+                            "(" & colvar & (curRow - 1) & "+" & colvar & (curRow + 1) & ")-" & colvar & (curRow - 3) & ",0))"
+                    Else
+                        ' Standard: overpack only if total pack+dispatch > total needed
+                        Sheets(shName).Range(colvar & i).Offset(j - i + 5).Formula = _
+                            "=IF(($P" & (curRow - 1) & "+$P" & (curRow + 1) & ")>$P" & (curRow - 3) & "," & _
+                            "IF((" & colvar & (curRow - 1) & "+" & colvar & (curRow + 1) & ")-" & colvar & (curRow - 3) & ">0," & _
+                            "(" & colvar & (curRow - 1) & "+" & colvar & (curRow + 1) & ")-" & colvar & (curRow - 3) & ",0),0)"
+                    End If
+                Next m
+
+                ' --- Add SUMIFS formulas for specific summary columns if this is a GRAND TOTAL block ---
+                If Sheets(shName).Range("A" & curRow - 1).Value = "GR* TOT*" Then
+                    sCol2 = charCheck(curCol - 2)
+                    sCol3 = charCheck(curCol - 3)
+                    sCol1 = charCheck(curCol - 1)
+                    Sheets(shName).Range(sCol2 & i).Offset(j - i + 1).Formula = _
+                        "=SUMIFS(" & sCol2 & "$1:" & sCol2 & "$" & (curRow - 2) & ",$" & sColtot & "$1:$" & sColtot & "$" & (curRow - 2) & "," & Chr(34) & ">0" & Chr(34) & ")"
+                    Sheets(shName).Range(sCol3 & i).Offset(j - i + 1).Formula = _
+                        "=SUMIFS(" & sCol3 & "$1:" & sCol3 & "$" & (curRow - 2) & ",$" & sColtot & "$1:$" & sColtot & "$" & (curRow - 2) & "," & Chr(34) & ">0" & Chr(34) & ")"
+                    Sheets(shName).Range(sColtot & i).Offset(j - i + 1).Formula = _
+                        "=SUMIFS(" & sColtot & "$1:" & sColtot & "$" & (curRow - 2) & ",$" & sColtot & "$1:$" & sColtot & "$" & (curRow - 2) & "," & Chr(34) & ">0" & Chr(34) & ")"
+                    Sheets(shName).Range(sCol1 & i).Offset(j - i + 5).Formula = _
+                        "=SUMIFS(" & sCol1 & "$1:" & sCol1 & "$" & (curRow - 2) & ",$L$1:$L$" & (curRow - 2) & ",$L" & (curRow + 3) & ")"
+                End If
+
+            Else
+                ' Row does not match H or S: skip it, increment the skip counter
+                k = k + 1
+            End If
+        Next i
+
+        ' =====================================================================
+        ' GRAND TOTAL ROW
+        ' Appended after all variety blocks. Sums each sub-row type across
+        ' all varieties using SUMIFS filtered by the row label in column L.
+        ' =====================================================================
+        With ThisWorkbook.Worksheets(shName).Range("A1").CurrentRegion
+            i = ThisWorkbook.Worksheets(shName).Cells(.Rows.Count, 1).Row + 1
+        End With
+
+        ' Format the 6 sub-rows of the Grand Total block
+        For l = 1 To 6
+            With Sheets(shName).Range("L" & i & ":O" & i).Offset(j - i + l)
+                .HorizontalAlignment = xlCenterAcrossSelection
+                .VerticalAlignment = xlCenter
+            End With
+            With Sheets(shName).Range("A" & i & ":" & sColterm & i).Offset(j - i + l).Borders
+                .LineStyle = xlContinuous
+                .Color = vbBlack
+                .Weight = xlThin
+            End With
+            Sheets(shName).Range("A" & i & ":" & sColterm & i).Offset(j - i + l).Font.Bold = True
+            Sheets(shName).Range("A" & i & ":" & sColterm & i).Offset(j - i + l).Interior.Color = RGB(165, 175, 200)
+        Next l
+
+        ' Write per-size SUMIFS formulas for the Grand Total sub-rows
+        For m = curCol To (totCol - 1)
+            colvar = charCheck(m)
+            curRow = Sheets(shName).Range("Q" & i).Offset(j - i + 2).Row
+            For l = 2 To 6
+                Sheets(shName).Range(colvar & i).Offset(j - i + l).Formula = _
+                    "=SUMIFS(" & colvar & "$1:" & colvar & "$" & (curRow - 2) & ",$L$1:$L$" & (curRow - 2) & ",$L" & (curRow - 1) & ")"
+            Next l
+            Sheets(shName).Range(colvar & i).Offset(j - i + 1).Formula = _
+                "=SUMIFS(" & colvar & "$1:" & colvar & "$" & (curRow - 2) & ",$" & sColtot & "$1:$" & sColtot & "$" & (curRow - 2) & "," & Chr(34) & ">0" & Chr(34) & ")"
+        Next m
+
+        ' Grand Total header label and top border
+        Sheets(shName).Range("A" & i).Offset(j - i + 1).Value = "GRAND TOTAL"
+        With Sheets(shName).Range("A" & i & ":" & sColterm & i).Offset(j - i + 1).Borders(xlEdgeTop)
+            .LineStyle = xlContinuous
+            .Color = vbBlack
+            .Weight = xlMedium
+        End With
+
+        ' Row labels for Grand Total sub-rows
+        With Sheets(shName).Cells(i, "L")
+            .Offset(j - i + 2).Value = "Pallets Needed"
+            .Offset(j - i + 3).Value = "Pallets Outstanding"
+            .Offset(j - i + 4).Value = "Pallets in Stock"
+            .Offset(j - i + 5).Value = "Pallets Overpacked"
+            .Offset(j - i + 6).Value = "Pallets Dispatched"
+        End With
+
+        ' Grand Total per-row SUMIFS (summing by row label in column L)
+        For m = curCol To (totCol - 1)
+            colvar = charCheck(m)
+            For l = 2 To 6
+                Sheets(shName).Range(colvar & i).Offset(j - i + l).Formula = _
+                    "=SUMIFS(" & colvar & "$1:" & colvar & "$" & (curRow - 2) & ",$L$1:$L$" & (curRow - 2) & ",$L" & (curRow + l - 2) & ")"
+            Next l
+            Sheets(shName).Range(colvar & i).Offset(j - i + 1).Formula = _
+                "=SUMIFS(" & colvar & "$1:" & colvar & "$" & (curRow - 2) & ",$" & sColtot & "$1:$" & sColtot & "$" & (curRow - 2) & "," & Chr(34) & ">0" & Chr(34) & ")"
+        Next m
+
+        ' Summary column SUMIFS for Grand Total
+        sCol2 = charCheck(curCol - 2)
+        sCol3 = charCheck(curCol - 3)
+        sCol1 = charCheck(curCol - 1)
+        Sheets(shName).Range(sCol2 & i).Offset(j - i + 1).Formula = _
+            "=SUMIFS(" & sCol2 & "$1:" & sCol2 & "$" & (curRow - 2) & ",$" & sColtot & "$1:$" & sColtot & "$" & (curRow - 2) & "," & Chr(34) & ">0" & Chr(34) & ")"
+        Sheets(shName).Range(sCol3 & i).Offset(j - i + 1).Formula = _
+            "=SUMIFS(" & sCol3 & "$1:" & sCol3 & "$" & (curRow - 2) & ",$" & sColtot & "$1:$" & sColtot & "$" & (curRow - 2) & "," & Chr(34) & ">0" & Chr(34) & ")"
+        Sheets(shName).Range(sColtot & i).Offset(j - i + 1).Formula = _
+            "=SUMIFS(" & sColtot & "$1:" & sColtot & "$" & (curRow - 2) & ",$" & sColtot & "$1:$" & sColtot & "$" & (curRow - 2) & "," & Chr(34) & ">0" & Chr(34) & ")"
+        Sheets(shName).Range(sCol1 & i).Offset(j - i + 5).Formula = _
+            "=SUMIFS(" & sCol1 & "$1:" & sCol1 & "$" & (curRow - 2) & ",$L$1:$L$" & (curRow - 2) & ",$L" & (curRow + 3) & ",$P$1:$P$" & (curRow - 2) & "," & Chr(34) & ">0" & Chr(34) & ")"
+
+        ' Column P totals for Grand Total (sub-rows 2-6, skipping row 5 which is handled above)
+        For l = 2 To 6
+            If l <> 5 Then
+                Sheets(shName).Range(sCol1 & i).Offset(j - i + l).Formula = _
+                    "=SUM(Q" & (curRow + l - 2) & ":" & sColfinnum & (curRow + l - 2) & ")"
+            End If
+        Next l
+
+        ' --- Final formatting ---
+        Sheets(shName).Rows("1:" & j).EntireRow.Hidden = False
+        Sheets(shName).Range("P:P").NumberFormat = "General"
+        Sheets(shName).Range("A1").Select
+        Sheets(shName).Visible = xlSheetVisible
+        Application.ScreenUpdating = True
+        UserForm1.Hide
+
+    End If  ' answer = "6"
+
+    OptimizeVBA (False)
+End Sub
+
+
+' =============================================================================
+' RIBBON WRAPPER: Update_Stuff_R
+' =============================================================================
+Public Sub Update_Stuff_R(control As IRibbonControl)
+    Update_Stuff
+End Sub
+
+
+' =============================================================================
+' UPDATE_STUFF
+' Master update routine. Refreshes SQL data via Power Query, then recalculates
+' all pallet counts, summary, charts, and exports the file.
+'
+' FLOW:
+'   1. Prompt user for Pick Reference range (start/end week-day codes).
+'   2. Build Power Query M code for "Dispatches" query (out_det table).
+'   3. Build Power Query M code for "DataQuery" (in_det table, filtered by
+'      pick ref range, farm filter, and Valencia grouping setting).
+'   4. Refresh both queries.
+'   5. Call Input_Stuff  -> writes per-size COUNTIFS formulas into Vordering.
+'   6. Call Short_Stuff  -> rebuilds the Opsomming summary sheet.
+'   7. Call Chart_Stuff  -> rebuilds the Grafieke charts sheet.
+'   8. Call Export_Stuff -> saves and emails the report workbook.
+'
+' PICK REFERENCE FORMAT:
+'   Pick Refs are 4-digit codes used to filter the pallet intake data.
+'   The encoding is: [last digit of week][day of week][0][first digit of week]
+'   for double-digit weeks, or [week][day]["00"] for single-digit weeks.
+'   These get rearranged into a sortable 4-char string: DDWW (day,day,week,week).
+'   The Power Query uses a custom order list (CustomOrder) to filter by range.
+'
+' CONTROL CELLS (Data sheet):
+'   U1 = Farm filter: "All" | "Mahela" | other (non-Mahela)
+'   V1 = Valencia toggle: "ON" groups DEL/APV/MKN/GSV as "VAL"
+'   Y1 = Current Week mode: "ON" auto-selects today's pick ref
+'   Z1 = Last selected start pick ref
+'   AA1= Last selected end pick ref (current day)
+' =============================================================================
+Public Sub Update_Stuff()
+    InitiateConstants
+    curper = 0
+
+    Dim fullFile As String, currFile As String
+    Dim wbName As String
+    Dim wb As Workbook, wb1 As Workbook
+    Dim i As Integer
+    Dim farcurr() As String
+    Dim farst() As Integer, faren() As Integer
+    ReDim farcurr(18) As String
+    ReDim farst(18) As Integer
+    ReDim faren(18) As Integer
+    totPerc = 0
+
+    ' --- Configure progress bar ---
+    UserForm1.Width = 220
+    UserForm1.Frame1.Width = 200
+    UserForm1.Height = 98
+    UserForm1.StartUpPosition = 2
+    UserForm1.Caption = "Progress Bar"
+    UserForm1.Label1.Caption = "0% Completed"
+    UserForm1.Label2.Caption = ""
+    UserForm1.Label3.Caption = "Initiating update..."
+    UserForm1.Label2.Width = 0
+    UserForm1.Label2.Height = UserForm1.Frame1.Height - 4
+    UserForm1.Label2.BackColor = vbRed
+    UserForm1.Frame1.Caption = ""
+    UserForm1.Show (False)
+
+    OptimizeVBA (True)
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
+
+    shName = "Vordering"
+    currFile = ThisWorkbook.FullName
+
+    Dim disName As String
+    ansName = "Data"
+    disName = "V_Dispatches"
+
+    ' Ensure the Data and Vordering sheets exist
+    If Not sheetExists(ansName) Then
+        Workbook_Open
+    Else
+        ThisWorkbook.Worksheets(ansName).Visible = xlSheetVisible
+    End If
+    If Not sheetExists(shName) Then
+        Setup_Stuff
+    End If
+
+    Application.ScreenUpdating = True
+    Application.Calculation = xlCalculationAutomatic
+
+    ' --- Declare variables for pick reference logic ---
+    Dim dLastCell As Range, LastCell As Range
+    Dim j As Integer, k As Integer, finalRow As Integer
+    Dim weekval As Integer, weekval2 As Integer
+    Dim checker As Integer, weeksnum As Integer, weekfnum As Integer
+    Dim testvar As Integer, testvar2 As Integer, curPerc As Integer
+    Dim pdchecker As String, pchecker As String
+    Dim pcheck1 As String, pcheck2 As String, pcheck3 As String
+    Dim curpickref As String, spickref As String
+    Dim p1 As String, p2 As String, ans As String
+    Dim found As Boolean, found2 As Boolean
+
+    found = False: found2 = False
+    weeksnum = 2: weekfnum = finalRow
+    testvar = -1: testvar2 = -1
+    p1 = ThisWorkbook.Worksheets(ansName).Range("Z1").Value   ' Previously saved start ref
+    p2 = ThisWorkbook.Worksheets(ansName).Range("AA1").Value  ' Previously saved end ref
+    ans = "7"   ' "7" = vbNo default
+
+    ' --- Calculate today's pick reference strings ---
+    ' curpickref = today's specific pick ref (week + day)
+    ' spickref   = start-of-this-week pick ref (week + "100")
+    If WorksheetFunction.WeekNum(Date, vbSunday) < 10 Then
+        curpickref = WorksheetFunction.WeekNum(Date, vbMonday) & Weekday(Date, vbMonday) & "00"
+        spickref = WorksheetFunction.WeekNum(Date, vbMonday) & "100"
+    Else
+        curpickref = Right(Str(WorksheetFunction.WeekNum(Date, vbMonday)), 1) & Weekday(Date, vbMonday) & "0" & Mid(Str(WorksheetFunction.WeekNum(Date, vbMonday)), 2, 1)
+        spickref = Right(Str(WorksheetFunction.WeekNum(Date, vbMonday)), 1) & "10" & Mid(Str(WorksheetFunction.WeekNum(Date, vbMonday)), 2, 1)
+    End If
+
+    ' Block execution if Y1 is OFF and no saved pick ref exists
+    If ThisWorkbook.Worksheets(ansName).Range("Y1").Value = "OFF" And p1 = "" Then
+        MsgBox "Please at least select either 'Current Week' or provide a starting Pick Reference.", vbExclamation = vbOKOnly, "Select a Pick Ref."
+        OptimizeVBA (False)
+        UserForm1.Hide
+        ThisWorkbook.Worksheets(shName).Activate
+        Exit Sub
+    End If
+
+    pickedref1 = p1
+
+    ' --- Determine pickedref1 (start of range) ---
+    ' If Y1 = "OFF", use manual input or saved value; otherwise use today's week start
+    ThisWorkbook.Activate
+    If ThisWorkbook.Worksheets(ansName).Range("Y1").Value = "OFF" Then
+        If p1 = "" Then
+            ' Prompt user for start pick ref
+            Do
+                pickedref1 = InputBox("Enter starting Pick Reference needed: " & charCheck(13) & "(This week's Pick Reference is " & spickref & ")", "Pick Reference", spickref)
+                If pickedref1 = "" Then pickedref1 = 0
+                If Not IsNumeric(pickedref1) Then MsgBox "Please enter a valid number for the Pick Reference.", vbOKOnly
+            Loop Until IsNumeric(pickedref1)
+        End If
+        ForceRibbonRefresh
+    Else
+        ' Auto mode: use this week's start pick ref
+        pickedref1 = spickref
+    End If
+
+    ' --- Rearrange pick ref strings into sortable format ---
+    ' If week is <10 then make sure it makes "09" and not just "9"
+    ' Original format: [week][day]["0"][week_digit2] or [week][day]["00"] (4 chars)
+    ' Sortable format: rotate so the 4th char goes first
+    ' This makes them directly comparable as strings.
+    If Len(p1) < 4 Then p1 = "0" & p1
+    If Len(p2) < 4 Then p2 = "0" & p2
+    p1 = Right(p1, 1) & Left(p1, 3)
+    p2 = Right(p2, 1) & Left(p2, 3)
+    curpickref = Right(curpickref, 1) & Left(curpickref, 3)
+    pickedref1 = Right(pickedref1, 1) & Left(pickedref1, 3)
+
+    ' --- Determine pickedref2 (end of range) ---
+    If ThisWorkbook.Worksheets(ansName).Range("Y1").Value = "OFF" Then
+        ' Discard saved p2 if it's before p1
+        If p2 < p1 Then p2 = ""
+        If (p2 < curpickref) Then
+            If p2 = "" Then
+                p2 = curpickref
+            Else
+                ' Offer to use today's pick ref instead of the saved end ref
+                p2 = Right(p2, 3) & Left(p2, 1)
+                curpickref = Right(curpickref, 3) & Left(curpickref, 1)
+                ans = MsgBox("Do you want to use the latest Pick Ref, " & curpickref & "?" & Chr(13) & "(Current selection is " & p2 & ".)", vbQuestion + vbYesNo, "User Response")
+                p2 = Right(p2, 1) & Left(p2, 3)
+                curpickref = Right(curpickref, 1) & Left(curpickref, 3)
+            End If
+        End If
+        If ans = "6" Then p2 = curpickref  ' User said Yes
+
+        ' If still no end ref, ask the user for one
+        pickedref2 = Right(curpickref, 1) & Left(curpickref, 3)
+        If p2 = "" Then
+            Do
+                If pickedref1 > curpickref Then
+                    pickedref1 = Right(pickedref1, 3) & Left(pickedref1, 1)
+                    pickedref2 = InputBox("Enter final Pick Reference needed: " & charCheck(13) & "(Selected start Pick Reference is " & pickedref1 & ")", "Week Number", pickedref1)
+                    pickedref1 = Right(pickedref1, 1) & Left(pickedref1, 3)
+                Else
+                    curpickref = Right(curpickref, 3) & Left(curpickref, 1)
+                    pickedref2 = InputBox("Enter final Pick Reference needed: " & charCheck(13) & "(Today's Pick Reference is " & curpickref & ")", "Week Number", curpickref)
+                End If
+                If pickedref2 = "" Then pickedref2 = 0
+                pickedref2 = Right(pickedref2, 1) & Left(pickedref2, 3)
+                If pickedref2 < pickedref1 Then pickedref2 = "Whoops"  ' Invalidate if end < start
+                If Not IsNumeric(pickedref2) Then MsgBox "Please enter a valid number for the final Pick Reference number.", vbOKOnly
+            Loop Until IsNumeric(pickedref2)
+            pickedref2 = Right(pickedref2, 1) & Left(pickedref2, 3)
+        Else
+            pickedref2 = Right(p2, 3) & Left(p2, 1)
+        End If
+        pickedref2 = Right(pickedref2, 1) & Left(pickedref2, 3)
+    Else
+        ' Auto mode: use today as end ref, unless pickedref1 is in the future
+        If pickedref1 > curpickref Then
+            pickedref2 = pickedref1
+        Else
+            pickedref2 = curpickref
+        End If
+    End If
+
+    ' --- Final format adjustment: ensure 4-digit pick refs with leading zeros ---
+    ' Re-rotate from sortable back to original order, then zero-pad to 4 digits
+    If (Mid(pickedref1, 2, 1) = "0") Then
+        pickedref1 = Right(pickedref1, 2) & Left(pickedref1, 1)
+    Else
+        pickedref1 = Right(pickedref1, 3) & Left(pickedref1, 1)
+    End If
+    If (Mid(pickedref2, 2, 1) = "0") Then
+        pickedref2 = Right(pickedref2, 2) & Left(pickedref2, 1)
+    Else
+        pickedref2 = Right(pickedref2, 3) & Left(pickedref2, 1)
+    End If
+    If Len(pickedref1) = 3 Then pickedref1 = "0" & pickedref1
+    If Len(pickedref2) = 3 Then pickedref2 = "0" & pickedref2
+
+    UserForm1.Show (False)
+
+    ' --- Clear the Data sheet ready for fresh query results ---
+    With ThisWorkbook.Worksheets(ansName)
+        .Select
+        On Error Resume Next
+        .ShowAllData   ' Clear any active filters
+        On Error GoTo 0
+        If (.Rows.Count < 100000) Then
+            .Rows(2 & ":" & .Rows.Count).Delete
+        End If
+        On Error Resume Next
+        .ShowAllData
+        On Error GoTo 0
+    End With
+
+    ' =========================================================================
+    ' POWER QUERY: "Dispatches" (out_det table)
+    ' Pulls PALLET_ID and SEQ_NO from the dispatch table.
+    ' SEQ_NO > 0 means the pallet has been dispatched.
+    ' =========================================================================
+    Dim mCode As String
+    Dim queryName As String
+
+    queryName = "Dispatches"
+    mCode = "let" & vbCrLf & _
+        "    Source = Sql.Database(" & Chr(34) & mServer & Chr(34) & ", " & Chr(34) & mDB & Chr(34) & ")," & vbCrLf & _
+        "    out_det_Sheet = Source{[Schema=" & Chr(34) & "dbo" & Chr(34) & ",Item=" & Chr(34) & "out_det" & Chr(34) & "]}[Data]," & vbCrLf & _
+        "    #""Removed Other Columns"" = Table.SelectColumns(out_det_Sheet ,{""PALLET_ID"", ""SEQ_NO""})," & vbCrLf & _
+        "    #""Changed Type"" = Table.TransformColumnTypes(#""Removed Other Columns"",{{""PALLET_ID"", type text}, {""SEQ_NO"", Int64.Type}})" & vbCrLf & _
+        "in" & vbCrLf & _
+        "#""Changed Type"""
+
+    ' Update progress bar
+    totPerc = 3: curper = totPerc
+    UserForm1.Label1.Caption = Str(totPerc) + "% Completed"
+    UserForm1.Label3.Caption = "Gathering Data..."
+    UserForm1.Label2.Width = totPerc * 2
+    DoEvents
+
+    ThisWorkbook.Queries(queryName).Formula = mCode
+    ThisWorkbook.Queries(queryName).Refresh
+
+    ' Update progress bar
+    totPerc = 4: curper = totPerc
+    UserForm1.Label1.Caption = Str(totPerc) + "% Completed"
+    UserForm1.Label3.Caption = "Transforming Data..."
+    UserForm1.Label2.Width = totPerc * 2
+    DoEvents
+
+    ' =========================================================================
+    ' POWER QUERY: "DataQuery" (in_det table)
+    ' Pulls pallet intake records, trims whitespace, reorders columns,
+    ' filters by the chosen pick reference range, optionally groups
+    ' Valencia varieties, optionally filters to own-farm pallets,
+    ' and left-joins with Dispatches to add a DISPATCH_MATCH column.
+    '
+    ' NOTE: The CustomOrder list defines the chronological order of all
+    '       pick references for the season. If a pick ref is missing from
+    '       this list, it will be excluded from results. Update the list
+    '       at the start of each new season.
+    ' =========================================================================
+    queryName = "DataQuery"
+    mCode = "let" & vbCrLf & _
+        "    Source = Sql.Database(" & Chr(34) & mServer & Chr(34) & ", " & Chr(34) & mDB & Chr(34) & ")," & vbCrLf & _
+        "    in_det_Sheet = Source{[Schema=" & Chr(34) & "dbo" & Chr(34) & ",Item=" & Chr(34) & "in_det" & Chr(34) & "]}[Data]," & vbCrLf & _
+        "    #""Removed Other Columns"" = Table.SelectColumns(in_det_Sheet,{""PALLET_ID"", ""CONS_NO"", ""ORGZN"", ""VARIETY"", ""PACK"", ""GRADE"", ""MARK"", ""SIZE_COUNT"", ""INV_CODE"", ""PICK_REF"", ""FARM"", ""TARG_MKT"", ""REASON"", ""BATCH_NO"", ""TARGET_COUNTRY"", ""TARGET_REGION""})," & vbCrLf & _
+        "    #""Changed Type"" = Table.TransformColumnTypes(#""Removed Other Columns"",{{""PALLET_ID"", type text}, {""CONS_NO"", type text}, {""ORGZN"", type text}, {""VARIETY"", type text}, {""PACK"", type text}, {""GRADE"", type text}, {""MARK"", type text}, {""SIZE_COUNT"", type text}, {""INV_CODE"", type text}, {""PICK_REF"", type text}, {""FARM"", type text}, {""TARG_MKT"", type text}, {""BATCH_NO"", type text}, {""TARGET_COUNTRY"", type text}, {""TARGET_REGION"", type text}})," & vbCrLf & _
+        "    #""Trimmed Text"" = Table.TransformColumns(#""Changed Type"",{{""PALLET_ID"", Text.Trim, type text}, {""CONS_NO"", Text.Trim, type text}, {""ORGZN"", Text.Trim, type text}, {""VARIETY"", Text.Trim, type text}, {""PACK"", Text.Trim, type text}, {""GRADE"", Text.Trim, type text}, {""MARK"", Text.Trim, type text}, {""SIZE_COUNT"", Text.Trim, type text}, {""INV_CODE"", Text.Trim, type text}, {""PICK_REF"", Text.Trim, type text}, {""FARM"", Text.Trim, type text}, {""TARG_MKT"", Text.Trim, type text}, {""REASON"", Text.Trim, type text}, {""BATCH_NO"", Text.Trim, type text}, {""TARGET_COUNTRY"", Text.Trim, type text}, {""TARGET_REGION"", Text.Trim, type text}})," & vbCrLf & _
+        "    #""Reordered Columns"" = Table.ReorderColumns(#""Trimmed Text"",{""PICK_REF"", ""CONS_NO"", ""ORGZN"", ""VARIETY"", ""TARG_MKT"", ""GRADE"", ""MARK"", ""PACK"", ""INV_CODE"", ""TARGET_REGION"", ""TARGET_COUNTRY"", ""BATCH_NO"", ""SIZE_COUNT"", ""FARM"", ""PALLET_ID"", ""REASON""})," & vbCrLf & _
+        "    OwnFarms = {""D6613"", ""D6592"", ""D6612"", ""D9483"", ""D17440"", ""D6611"", ""D6814"", ""D6631"", ""D0534"", ""D0991"", ""D6595"", ""D0992"", ""D15976"", ""D17273"", ""D15563"", ""D15155"", ""D14034"", ""D13867""}," & vbCrLf & _
+        "    CustomOrder = {""7100"", ""7200"", ""7300"", ""7400"", ""7500"", ""7600"", ""7700"", ""8100"", ""8200"", ""8300"", ""8400"", ""8500"", ""8600"", ""8700"", ""9100"", ""9200"", ""9300"", ""9400"", ""9500"", ""9600"", ""9700"", ""0101"", ""0201"", ""0301"", ""0401"", ""0501"", ""0601"", ""0701"", ""1101"", ""1201"", ""1301"", ""1401"", ""1501"", ""1601"", ""1701"", ""2101"", ""2201"", ""2301"", ""2401"", ""2501"", ""2601"", ""2701"", ""3101"", ""3201"", ""3301"", ""3401"", ""3501"", ""3601"", ""3701"", ""4101"", ""4201"", ""4301"", ""4401"", ""4501"", ""4601"", ""4701"", ""5101"", ""5201"", ""5301"", ""5401"", ""5501"", ""5601"", ""5701"", ""6101"", ""6201"", ""6301"", ""6401"", ""6501"", ""6601"", ""6701"", ""7101"", ""7201"", ""7301"", ""7401"", ""7501"", ""7601"", ""7701"", ""8101"", ""8201"", ""8301"", ""8401"", ""8501"", ""8601"", ""8701"", ""9101"", ""9201"", ""9301"", ""9401"", ""9501"", ""9601"", ""9701"", ""0102"", ""0202"", ""0302"", ""0402"", ""0502"", ""0602"", ""0702"", " & Chr(34) & _
+        "1102"", ""1202"",""1302"", ""1402"", ""1502"", ""1602"", ""1702"", ""2102"", ""2202"", ""2302"", ""2402"", ""2502"", ""2602"", ""2702"", ""3102"", ""3202"", ""3302"", ""3402"", ""3502"", ""3602"", ""3702"", ""4102"", ""4202"", ""4302"", ""4402"", ""4502"", ""4602"", ""4702"", ""5102"", ""5202"", ""5302"", ""5402"", ""5502"", ""5602"", ""5702"", ""6102"", ""6202"", ""6302"", ""6402"", ""6502"", ""6602"", ""6702"", ""7102"", ""7202"", ""7302"", ""7402"", ""7502"", ""7602"", ""7702"", ""8102"", ""8202"", ""8302"", ""8402"", ""8502"", ""8602"", ""8702"", ""9102"", ""9202"", ""9302"", ""9402"", ""9502"", ""9602"", ""9702"", ""0103"", ""0203"", ""0303"", ""0403"", ""0503"", ""0603"", ""0703"", ""1103"", ""1203"", ""1303"", ""1403"", ""1503"", ""1603"", ""1703"", ""2103"", ""2203"", ""2303"", ""2403"", ""2503"", ""2603"", ""2703"", " & Chr(34) & _
+        "3103"", ""3203"", ""3303"", ""3403"", ""3503"", ""3603"", ""3703"", ""4103"", ""4203"", ""4303"", ""4403"", ""4503"", ""4603"", ""4703"", ""5103"", ""5203"", ""5303"", ""5403"", ""5503"", ""5603"", ""5703"", ""6103"", ""6203"", ""6303"", ""6403"", ""6503"", ""6603"", ""6703"", ""7103"", ""7203"", ""7303"", ""7403"", ""7503"", ""7603"", ""7703"", ""8103"", ""8203"", ""8303"", ""8403"", ""8503"", ""8603"", ""8703"", ""9103"", ""9203"", ""9303"", ""9403"", ""9503"", ""9603"", ""9703""}," & vbCrLf & _
+        "    StartValue = " & Chr(34) & pickedref1 & Chr(34) & "," & vbCrLf & _
+        "    EndValue = " & Chr(34) & pickedref2 & Chr(34) & "," & vbCrLf & _
+        "    StartIndex = List.PositionOf(CustomOrder, StartValue)," & vbCrLf & _
+        "    EndIndex = List.PositionOf(CustomOrder, EndValue)," & vbCrLf & _
+        "    #""Added Sort Index"" = Table.AddColumn(#""Reordered Columns"", ""SortIndex"", each List.PositionOf(CustomOrder, [PICK_REF]), Int64.Type)," & vbCrLf & _
+        "    #""Filtered Range"" = Table.SelectRows(#""Added Sort Index"", each [SortIndex] >= StartIndex and [SortIndex] <= EndIndex)," & vbCrLf & _
+        "    #""Removed SortIndex"" = Table.RemoveColumns(#""Filtered Range"", {""SortIndex""})," & vbCrLf
+
+    ' --- Conditional M code: Valencia variety grouping ---
+    ' V1 = "ON": group DEL/APV/MKN/GSV all under "VAL"
+    ' V1 = "OFF": keep each variety separate
+    If ThisWorkbook.Worksheets(ansName).Range("V1").Value = "ON" Then
+        mCode = mCode & "    #""Grouped Valencia Varieties"" = Table.AddColumn(#""Removed SortIndex"", ""VARIETY_GROUP"", each if List.Contains({""DEL"", ""APV"", ""MKN"", ""GSV""}, [VARIETY]) then ""VAL"" else [VARIETY])," & vbCrLf
+    Else
+        mCode = mCode & "    #""Grouped Valencia Varieties"" = Table.AddColumn(#""Removed SortIndex"", ""VARIETY_GROUP"", each [VARIETY])," & vbCrLf
+    End If
+
+    ' --- Conditional M code: Farm filter ---
+    ' U1 = "Mahela": only own-farm pallets (FARM in OwnFarms list)
+    ' U1 = "All":    all pallets regardless of farm
+    ' Other:         non-own-farm pallets only
+    If ThisWorkbook.Worksheets(ansName).Range("U1").Value = "Mahela" Then
+        mCode = mCode & "    #""Filtered Own Farms"" = Table.SelectRows(#""Grouped Valencia Varieties"", each List.Contains(OwnFarms, [FARM]))," & vbCrLf & _
+            "    #""Merged Dispatch"" = Table.NestedJoin(#""Filtered Own Farms"", {""PALLET_ID""}, Dispatches, {""PALLET_ID""}, ""DispatchLookup"", JoinKind.LeftOuter)," & vbCrLf
+    ElseIf ThisWorkbook.Worksheets(ansName).Range("U1").Value = "All" Then
+        mCode = mCode & "    #""Merged Dispatch"" = Table.NestedJoin(#""Grouped Valencia Varieties"", {""PALLET_ID""}, Dispatches, {""PALLET_ID""}, ""DispatchLookup"", JoinKind.LeftOuter)," & vbCrLf
+    Else
+        mCode = mCode & "    #""Filtered Own Farms"" = Table.SelectRows(#""Grouped Valencia Varieties"", each not List.Contains(OwnFarms, [FARM]))," & vbCrLf & _
+            "    #""Merged Dispatch"" = Table.NestedJoin(#""Filtered Own Farms"", {""PALLET_ID""}, Dispatches, {""PALLET_ID""}, ""DispatchLookup"", JoinKind.LeftOuter)," & vbCrLf
+    End If
+
+    ' Final M code: expand the dispatch join, replace nulls, reorder columns
+    mCode = mCode & _
+        "    #""Expand Dispatch"" = Table.ExpandTableColumn(#""Merged Dispatch"", ""DispatchLookup"", {""SEQ_NO""}, {""DISPATCH_MATCH""})," & vbCrLf & _
+        "    #""Dispatch Matched"" = Table.ReplaceValue(#""Expand Dispatch"", null, 0, Replacer.ReplaceValue, {""DISPATCH_MATCH""})," & vbCrLf & _
+        "    #""Reorder Columns"" = Table.ReorderColumns(#""Dispatch Matched"",{""PICK_REF"", ""CONS_NO"", ""ORGZN"", ""VARIETY"", ""TARG_MKT"", ""GRADE"", ""MARK"", ""PACK"", ""INV_CODE"", ""TARGET_REGION"", ""TARGET_COUNTRY"", ""BATCH_NO"", ""SIZE_COUNT"", ""FARM"", ""PALLET_ID"", ""VARIETY_GROUP"", ""DISPATCH_MATCH"", ""REASON""})" & vbCrLf & _
+        "in" & vbCrLf & _
+        "    #""Reorder Columns"""
+
+    ' Update progress bar
+    totPerc = 5: curper = totPerc
+    UserForm1.Label1.Caption = Str(totPerc) + "% Completed"
+    UserForm1.Label3.Caption = "Gathering Data..."
+    UserForm1.Label2.Width = totPerc * 2
+    DoEvents
+
+    ' Refresh the DataQuery (this loads data from SQL into the Data sheet)
+    OptimizeVBA (False)
+    ThisWorkbook.Queries(queryName).Formula = mCode
+    ThisWorkbook.Queries(queryName).Refresh
+    DoEvents
+    OptimizeVBA (True)
+
+    ' Update progress bar
+    totPerc = 6: curper = totPerc
+    UserForm1.Label1.Caption = Str(totPerc) + "% Completed"
+    UserForm1.Label3.Caption = "Transforming Data..."
+    UserForm1.Label2.Width = totPerc * 2
+    DoEvents
+
+    OptimizeVBA (False)
+    ThisWorkbook.Activate
+    ThisWorkbook.Worksheets(shName).Select
+    OptimizeVBA (True)
+
+    curper = totPerc
+    ThisWorkbook.Worksheets(ansName).Select
+
+    ' --- Step 5: Write COUNTIFS formulas into Vordering ---
+    ribref = False   ' Called from Update, not directly from Ribbon
+    Input_Stuff
+
+    ' --- Finish progress bar ---
+    totPerc = 0
+    UserForm1.Label1.Caption = "100% Completed"
+    UserForm1.Label2.Width = 200
+    UserForm1.Label3.Caption = "Finishing up"
+    DoEvents
+
+    OptimizeVBA (True)
+    DoEvents
+
+    ' --- Step 6: Rebuild Opsomming summary sheet ---
+    Short_Stuff
+
+    OptimizeVBA (False)
+    ThisWorkbook.Worksheets(ansName).Range("W1").Value = "Last Updated: " & Now()
+    DoEvents
+    ForceRibbonRefresh
+
+    ' --- Step 7: Rebuild Grafieke charts sheet ---
+    Chart_Stuff
+
+    ThisWorkbook.Worksheets(shName).Visible = xlSheetVisible
+    ThisWorkbook.Worksheets(shName).Select
+
+    ' --- Step 8: Export and email the report ---
+    Export_Stuff
+
+    OptimizeVBA (False)
+    ThisWorkbook.Worksheets(shName).Visible = xlSheetVisible
+    ThisWorkbook.Worksheets(shName).Select
+    UserForm1.Hide
+
+End Sub
+
+
+' =============================================================================
+' RIBBON WRAPPER: Input_Stuff_R
+' Called directly from Ribbon. Sets ribref=True so Input_Stuff shows its own
+' progress bar and hides it when done.
+' =============================================================================
+Sub Input_Stuff_R(control As IRibbonControl)
+    ribref = True
+    totPerc = 0
+    Input_Stuff
+End Sub
+
+
+' =============================================================================
+' INPUT_STUFF
+' Writes COUNTIFS formulas into the "Pallets in Stock" and "Pallets Dispatched"
+' rows of Vordering, looking up values from the Data sheet.
+'
+' WHAT IT DOES:
+'   For each row in Vordering that is labelled "Pallets Dispatched" or
+'   "Pallets in Stock", writes a COUNTIFS formula that counts matching pallets
+'   in the Data sheet based on:
+'     - Variety (col C), Variety Group (col P/D), Target Market (E), Grade (F),
+'       Mark (G), Pack (H), Inv Code (I), Targ Mkt (J), Batch (K),
+'       Dispatch Match (R), Farm (L), Size/Count (M)
+'
+'   The Size/Count lookup is the most complex part: some column headers in
+'   Vordering use combined sizes like "36(45)" or "20,22" that need to be
+'   mapped to the actual SIZE_COUNT values in the database.
+'   The mapping differs by carton type (A15C vs others) and fruit type
+'   (soft citrus uses X-codes like "1X", "1XX").
+'
+'   After writing formulas, a second pass checks for "doubled" lines
+'   (same variety/grade/pack appearing twice in the Pakplan due to split
+'   batches) and subtracts their counts to avoid double-counting.
+'
+' NOTE:
+'   - `ribref = True`  means this sub was called standalone (shows its own
+'                      progress bar and hides it when done)
+'   - `ribref = False` means it was called from Update_Stuff (shares the bar)
+' =============================================================================
+Sub Input_Stuff()
+
+    Dim prog As Double
+    Dim ansName As String
+    Dim shName As String
+    Dim totPerc As Integer
+    Dim dval As Integer, ivalue As Integer
+    Dim sForm As String, sPack As String
+    ansName = "Data"
+    shName = "Vordering"
+
+    Dim i As Integer, j As Integer, k As Integer
+    Dim vals As Integer, vorRows As Integer, totCol As Integer
+    vals = 0
+    totCol = Sheets(shName).Range("Q" & startline & ":AZ" & startline).Find("TOTAL", , xlValues, xlWhole).Column
+    vorRows = ThisWorkbook.Worksheets(shName).Columns(totCol).Find("*", SearchOrder:=xlByRows, SearchDirection:=xlPrevious).Row + 5
+
+    ' --- Pre-style: colour the Dispatched and In Stock row backgrounds ---
+    For i = (vorRows - 4) To vorRows
+        If (ThisWorkbook.Worksheets(shName).Cells(i, 12).Value = "Pallets Dispatched") Or _
+           (ThisWorkbook.Worksheets(shName).Cells(i, 12).Value = "Pallets in Stock") Then
+            ThisWorkbook.Sheets(shName).Cells(i, 16).Interior.Color = RGB(214, 220, 228)
+            For j = 17 To totCol - 1
+                ThisWorkbook.Sheets(shName).Cells(i, j).Interior.Color = RGB(214, 220, 228)
+            Next j
+        End If
+    Next i
+
+    vari = ThisWorkbook.Sheets(shName).Cells(4, 4).Value
+
+    Dim doubledCheck As Integer
+    doubledCheck = 0
+
+    ' Show progress bar if called standalone from Ribbon
+    If ribref Then
+        UserForm1.Width = 220
+        UserForm1.Frame1.Width = 200
+        UserForm1.Height = 98
+        UserForm1.StartUpPosition = 2
+        UserForm1.Caption = "Progress Bar"
+        UserForm1.Label1.Caption = "0% Completed"
+        UserForm1.Label2.Caption = ""
+        UserForm1.Label3.Caption = "Updating values..."
+        UserForm1.Label2.Width = 0
+        UserForm1.Label2.Height = UserForm1.Frame1.Height - 4
+        UserForm1.Label2.BackColor = vbRed
+        UserForm1.Frame1.Caption = ""
+        UserForm1.Show (False)
+    End If
+
+    ' =========================================================================
+    ' MAIN LOOP: For each row in Vordering, check if it's a count row.
+    ' - "Pallets Dispatched" rows: count pallets that went through the packhouse
+    '   but are NOT at packhouse (i.e. DISPATCH_MATCH = non-null -> dispatched)
+    ' - "Pallets in Stock" rows: count pallets still AT packhouse
+    ' =========================================================================
+    For i = 1 To (vorRows - 5)
+
+        ' Update progress bar colour and percentage
+        prog = (i - 1) / (vorRows - 5 - 1)
+        UserForm1.Label2.BackColor = GetProgressColor(CDbl(prog))
+        If ribref Then
+            totPerc = Round((i / (vorRows - 5)) * 100, 0)
+        Else
+            ' When called from Update_Stuff, progress starts from curper (already ~6%)
+            totPerc = curper + Round((i / (vorRows - 5)) * 88, 0)
+        End If
+        If totPerc > 100 Then totPerc = 100
+        UserForm1.Label1.Caption = Str(totPerc) + "% Completed"
+        UserForm1.Label2.Width = totPerc * 2
+        UserForm1.Label3.Caption = "Updating Values..."
+        DoEvents
+
+        ' Determine if this row is a counting row and set sPack filter accordingly
+        ' vals = the row number of the corresponding Pakplan data row
+        If ThisWorkbook.Worksheets(shName).Cells(i, 12).Value = "Pallets Dispatched" Then
+            vals = i - 5        ' Data row is 5 rows above the Dispatched label row
+            sPack = "<>PACKHOUSE"   ' Dispatched pallets are NOT at packhouse
+        ElseIf ThisWorkbook.Worksheets(shName).Cells(i, 12).Value = "Pallets in Stock" Then
+            vals = i - 3        ' Data row is 3 rows above the In Stock label row
+            sPack = "PACKHOUSE"     ' In-stock pallets ARE at packhouse
+        Else
+            vals = 0            ' Not a counting row; skip
+        End If
+
+        If vals <> 0 Then
+            ThisWorkbook.Sheets(shName).Cells(i, 16).Interior.Color = RGB(230, 230, 230)
+
+            ' --- Build COUNTIFS formula for each size column ---
+            For j = 17 To totCol - 1
+
+                ' Start building the COUNTIFS formula string.
+                ' The formula counts rows in Data that match:
+                '   ORGZN (col C)  = Vordering col C of the data row
+                '   VARIETY_GROUP (col P) = Vordering col D (or "VAL" if V1=ON)
+                '   TARG_MKT (col E) = Vordering col E
+                '   GRADE (col F)  = Vordering col F
+                '   MARK (col G)   = Vordering col G
+                '   PACK (col H)   = Vordering col H
+                '   INV_CODE (col I) = Vordering col I (or "" if blank)
+                '   TARGET_REGION (col J) = Vordering col J
+                '   TARGET_COUNTRY (col K) = Vordering col K
+                '   REASON (col R) = "" (only count non-rejected pallets)
+                '   FARM (col L)   = Vordering col P (or "" if blank)
+                '   SIZE_COUNT (col M) = [determined per size column below]
+''                If ThisWorkbook.Worksheets(ansName).Range("V1").Value = "OFF" Then
+''                    ' V1=OFF: match variety directly from col D
+'''                    sForm = "=IF(NOT(ISBLANK(" & charCheck(j + 64) & vals & ")),COUNTIFS(" & _
+'''                        ansName & "!$C:$C,$C" & vals & "," & _
+'''                        ansName & "!$P:$P,$D" & vals & "," & _
+'''                        ansName & "!$E:$E,$E" & vals & "," & _
+'''                        ansName & "!$F:$F,$F" & vals & "," & _
+'''                        ansName & "!$G:$G,$G" & vals & "," & _
+'''                        ansName & "!$H:$H,$H" & vals & "," & _
+'''                        ansName & "!$I:$I,IF(ISBLANK($I" & vals & ")," & charCheck(34) & charCheck(34) & ",$I" & vals & ")," & _
+'''                        ansName & "!$J:$J,$J" & vals & "," & _
+'''                        ansName & "!$K:$K,$K" & vals & "," & _
+'''                        ansName & "!$R:$R," & charCheck(34) & charCheck(34) & "," & _
+'''                        ansName & "!$L:$L,IF(ISBLANK($P" & vals & ")," & charCheck(34) & charCheck(34) & ",$P" & vals & ")," & _
+'''                        ansName & "!$M:$M," 'All check
+'''                    sForm = "=IF(NOT(ISBLANK(" & charCheck(j + 64) & vals & ")),COUNTIFS(" & _
+'''                        ansName & "!$C:$C,$C" & vals & "," & _
+'''                        ansName & "!$P:$P,$D" & vals & "," & _
+'''                        ansName & "!$E:$E,$E" & vals & "," & _
+'''                        ansName & "!$F:$F,$F" & vals & "," & _
+'''                        ansName & "!$H:$H,$H" & vals & "," & _
+'''                        ansName & "!$I:$I,IF(ISBLANK($I" & vals & ")," & charCheck(34) & charCheck(34) & ",$I" & vals & ")," & _
+'''                        ansName & "!$J:$J,$J" & vals & "," & _
+'''                        ansName & "!$K:$K,$K" & vals & "," & _
+'''                        ansName & "!$R:$R," & charCheck(34) & charCheck(34) & "," & _
+'''                        ansName & "!$L:$L,IF(ISBLANK($P" & vals & ")," & charCheck(34) & charCheck(34) & ",$P" & vals & ")," & _
+'''                        ansName & "!$M:$M," 'No Brand check
+''                    sForm = "=IF(NOT(ISBLANK(" & charCheck(j + 64) & vals & ")),COUNTIFS(" & _
+''                        ansName & "!$C:$C,$C" & vals & "," & _
+''                        ansName & "!$P:$P,$D" & vals & "," & _
+''                        ansName & "!$E:$E,$E" & vals & "," & _
+''                        ansName & "!$F:$F,$F" & vals & "," & _
+''                        ansName & "!$G:$G,$G" & vals & "," & _
+''                        ansName & "!$I:$I,IF(ISBLANK($I" & vals & ")," & charCheck(34) & charCheck(34) & ",$I" & vals & ")," & _
+''                        ansName & "!$J:$J,$J" & vals & "," & _
+''                        ansName & "!$K:$K,$K" & vals & "," & _
+''                        ansName & "!$R:$R," & charCheck(34) & charCheck(34) & "," & _
+''                        ansName & "!$L:$L,IF(ISBLANK($P" & vals & ")," & charCheck(34) & charCheck(34) & ",$P" & vals & ")," & _
+''                        ansName & "!$M:$M," 'No Pack check
+''                Else
+''                    ' V1=ON: match "VAL" for all Valencia varieties
+''                    sForm = "=IF(NOT(ISBLANK(" & charCheck(j + 64) & vals & ")),COUNTIFS(" & _
+''                        ansName & "!$C:$C,$C" & vals & "," & _
+''                        ansName & "!$P:$P," & Chr(34) & "VAL" & Chr(34) & "," & _
+''                        ansName & "!$E:$E,$E" & vals & "," & _
+''                        ansName & "!$F:$F,$F" & vals & "," & _
+''                        ansName & "!$G:$G,$G" & vals & "," & _
+''                        ansName & "!$H:$H,$H" & vals & "," & _
+''                        ansName & "!$I:$I,IF(ISBLANK($I" & vals & ")," & charCheck(34) & charCheck(34) & ",$I" & vals & ")," & _
+''                        ansName & "!$J:$J,$J" & vals & "," & _
+''                        ansName & "!$K:$K,$K" & vals & "," & _
+''                        ansName & "!$R:$R," & charCheck(34) & charCheck(34) & "," & _
+''                        ansName & "!$L:$L,IF(ISBLANK($P" & vals & ")," & charCheck(34) & charCheck(34) & ",$P" & vals & ")," & _
+''                        ansName & "!$M:$M,"
+''                End If
+
+                sForm = BuildFullFormula(shName, ansName, startline, j, vals, sPack, , totCol)
+
+                ' Colour the cell light grey (will be overwritten if formula fills in)
+                ThisWorkbook.Sheets(shName).Cells(i, j).Interior.Color = RGB(230, 230, 230)
+
+''                ' Colour the cell light grey (will be overwritten if formula fills in)
+''                ThisWorkbook.Sheets(shName).Cells(i, j).Interior.Color = RGB(230, 230, 230)
+
+                ' ---------------------------------------------------------------
+                ' SIZE MAPPING
+                ' The column header in Vordering may be a combined size like "36(45)"
+                ' which maps to different SIZE_COUNT values in the DB depending on
+                ' the carton type (A15C uses the smaller count; others use the larger).
+                '
+                ' The outer Select Case branches by what type of fruit/size range
+                ' is used (based on the first size column header).
+                ' The inner Select Case maps the specific column header to the
+                ' SIZE_COUNT value to search for.
+                '
+                ' To add a new size mapping: add a Case to the appropriate
+                ' outer branch and inner Case block.
+                ' ---------------------------------------------------------------
+'''''                Select Case ThisWorkbook.Worksheets(shName).Cells(startline, 17).Value
+'''''                    ' --- Citrus sizes (Grapefruit/Navel/Cara Cara/Valencia) ---
+'''''                    Case "18 (28)", "18", "28", "23 (32)", "32 (23)", "23", "32", "27 (35)", "35 (27)", "27", "35", _
+'''''                         "20, 22", "20 , 22", "20", "22", "32 (40)", "32", "40", _
+'''''                         "36 (45)", "36", "45", "40 (50)", "50", _
+'''''                         "18(28)", "23(32)", "32(23)", "27(35)", "35(27)", "20,22", "32(40)", "36(45)", "40(50)"
+'''''                        Select Case ThisWorkbook.Worksheets(shName).Cells(startline, j).Value
+'''''                            ' Combined sizes: A15C uses the left (smaller) count; others use the right (larger)
+'''''                            Case "18 (28)", "18(28)":
+'''''                                If Not ThisWorkbook.Worksheets(shName).Cells(vals, 8).Value = "A15C" Then: sForm = sForm & "28": Else: sForm = sForm & "18":
+'''''                            Case "23 (32)", "23(32)", "32(23)", "32 (23)":
+'''''                                If Not ThisWorkbook.Worksheets(shName).Cells(vals, 8).Value = "A15C" Then: sForm = sForm & "32": Else: sForm = sForm & "23":
+'''''                            Case "27 (35)", "27(35)", "35 (27)", "35(27)":
+'''''                                If Not ThisWorkbook.Worksheets(shName).Cells(vals, 8).Value = "A15C" Then: sForm = sForm & "35": Else: sForm = sForm & "27":
+'''''                            Case "20, 22", "20,22", "20 , 22"
+'''''                                ' "20,22" is a special case: count size 20 AND size 22 separately and add them
+'''''                                ' For Packhouse rows, just sum both counts directly.
+'''''                                ' For Dispatched rows, need to additionally filter by dispatch flag (Q col = 1).
+'''''                                If sPack = "PACKHOUSE" Then
+'''''                                    If ThisWorkbook.Worksheets(ansName).Range("V1").Value = "OFF" Then
+'''''                                        sForm = sForm & "20)+COUNTIFS(" & ansName & "!$C:$C,$C" & vals & "," & ansName & "!$P:$P,$D" & vals & "," & ansName & "!$E:$E,$E" & vals & "," & ansName & "!$F:$F,$F" & vals & "," & ansName & "!$G:$G,$G" & vals & "," & ansName & "!$H:$H,$H" & vals & "," & ansName & "!$I:$I,IF(ISBLANK($I" & vals & ")," & charCheck(34) & charCheck(34) & ",$I" & vals & ")," & ansName & "!$J:$J,$J" & vals & "," & ansName & "!$K:$K,$K" & vals & "," & ansName & "!$R:$R," & charCheck(34) & charCheck(34) & "," & ansName & "!$L:$L,IF(ISBLANK($P" & vals & ")," & charCheck(34) & charCheck(34) & ",$P" & vals & ")," & ansName & "!$M:$M,22"
+'''''                                    Else
+'''''                                        sForm = sForm & "20)+COUNTIFS(" & ansName & "!$C:$C,$C" & vals & "," & ansName & "!$P:$P," & Chr(34) & "VAL" & Chr(34) & "," & ansName & "!$E:$E,$E" & vals & "," & ansName & "!$F:$F,$F" & vals & "," & ansName & "!$G:$G,$G" & vals & "," & ansName & "!$H:$H,$H" & vals & "," & ansName & "!$I:$I,IF(ISBLANK($I" & vals & ")," & charCheck(34) & charCheck(34) & ",$I" & vals & ")," & ansName & "!$J:$J,$J" & vals & "," & ansName & "!$K:$K,$K" & vals & "," & ansName & "!$R:$R," & charCheck(34) & charCheck(34) & "," & ansName & "!$L:$L,IF(ISBLANK($P" & vals & ")," & charCheck(34) & charCheck(34) & ",$P" & vals & ")," & ansName & "!$M:$M,22"
+'''''                                    End If
+'''''                                Else
+'''''                                    If ThisWorkbook.Worksheets(ansName).Range("V1").Value = "OFF" Then
+'''''                                        sForm = sForm & "20, " & ansName & "!$Q:$Q,1)+COUNTIFS(" & ansName & "!$C:$C,$C" & vals & "," & ansName & "!$P:$P,$D" & vals & "," & ansName & "!$E:$E,$E" & vals & "," & ansName & "!$F:$F,$F" & vals & "," & ansName & "!$G:$G,$G" & vals & "," & ansName & "!$H:$H,$H" & vals & "," & ansName & "!$I:$I,IF(ISBLANK($I" & vals & ")," & charCheck(34) & charCheck(34) & ",$I" & vals & ")," & ansName & "!$J:$J,$J" & vals & "," & ansName & "!$K:$K,$K" & vals & "," & ansName & "!$R:$R," & charCheck(34) & charCheck(34) & "," & ansName & "!$L:$L,IF(ISBLANK($P" & vals & ")," & charCheck(34) & charCheck(34) & ",$P" & vals & ")," & ansName & "!$M:$M,22"
+'''''                                    Else
+'''''                                        sForm = sForm & "20, " & ansName & "!$Q:$Q,1)+COUNTIFS(" & ansName & "!$C:$C,$C" & vals & "," & ansName & "!$P:$P," & Chr(34) & "VAL" & Chr(34) & "," & ansName & "!$E:$E,$E" & vals & "," & ansName & "!$F:$F,$F" & vals & "," & ansName & "!$G:$G,$G" & vals & "," & ansName & "!$H:$H,$H" & vals & "," & ansName & "!$I:$I,IF(ISBLANK($I" & vals & ")," & charCheck(34) & charCheck(34) & ",$I" & vals & ")," & ansName & "!$J:$J,$J" & vals & "," & ansName & "!$K:$K,$K" & vals & "," & ansName & "!$R:$R," & charCheck(34) & charCheck(34) & "," & ansName & "!$L:$L,IF(ISBLANK($P" & vals & ")," & charCheck(34) & charCheck(34) & ",$P" & vals & ")," & ansName & "!$M:$M,22"
+'''''                                    End If
+'''''                                End If
+'''''                            Case "32 (40)", "32(40)":
+'''''                                If Not ThisWorkbook.Worksheets(shName).Cells(vals, j).Value = "Large" Then 'Account for "Large" counts
+'''''                                    If Not ThisWorkbook.Worksheets(shName).Cells(vals, 8).Value = "A15C" Then
+'''''                                        sForm = sForm & "40"
+'''''                                    Else
+'''''                                        sForm = sForm & "32"
+'''''                                    End If
+'''''                                Else
+'''''                                    sForm = sForm & Chr(34) & "L" & Chr(34)
+'''''                                End If
+'''''                            Case "36 (45)", "36(45)":
+'''''                                If Not ThisWorkbook.Worksheets(shName).Cells(vals, 8).Value = "A15C" Then: sForm = sForm & "45": Else: sForm = sForm & "36":
+'''''                            Case "40 (50)", "40(50)":
+'''''                                If Not ThisWorkbook.Worksheets(shName).Cells(vals, j).Value = "Medium" Then 'Account for "Medium" counts
+'''''                                    If Not ThisWorkbook.Worksheets(shName).Cells(vals, 8).Value = "A15C" Then
+'''''                                        sForm = sForm & "50"
+'''''                                    Else
+'''''                                        sForm = sForm & "40"
+'''''                                    End If
+'''''                                Else
+'''''                                    sForm = sForm & Chr(34) & "M" & Chr(34)
+'''''                                End If
+'''''                            Case "45 (21)", "45(21)":
+'''''                                If Not ThisWorkbook.Worksheets(shName).Cells(vals, 8).Value = "E07D" Then: sForm = sForm & "45": Else: sForm = sForm & "21":
+'''''                            Case "48 (55)", "48(55)":
+'''''                                If Not ThisWorkbook.Worksheets(shName).Cells(vals, 8).Value = "A15C" Then: sForm = sForm & "55": Else: sForm = sForm & "48":
+'''''                            Case "56 (60)", "56(60)":
+'''''                                If Not ThisWorkbook.Worksheets(shName).Cells(vals, j).Value = "Small" Then 'Account for "Small" counts
+'''''                                    If Not ThisWorkbook.Worksheets(shName).Cells(vals, 8).Value = "A15C" Then
+'''''                                        sForm = sForm & "60"
+'''''                                    Else
+'''''                                        sForm = sForm & "56"
+'''''                                    End If
+'''''                                Else
+'''''                                    sForm = sForm & Chr(34) & "S" & Chr(34)
+'''''                                End If
+'''''                            Case "64 (65)", "64(65)":
+'''''                                If Not ThisWorkbook.Worksheets(shName).Cells(vals, 8).Value = "A15C" Then: sForm = sForm & "65": Else: sForm = sForm & "64":
+'''''                            Case "72 (72)", "72(72)": sForm = sForm & "72"
+'''''                            Case "88 (90)", "88(90)":
+'''''                                If Not ThisWorkbook.Worksheets(shName).Cells(vals, 8).Value = "A15C" Then: sForm = sForm & "90": Else: sForm = sForm & "88":
+'''''                            Case "105 (96)", "105(96)":
+'''''                                If Not ThisWorkbook.Worksheets(shName).Cells(vals, 8).Value = "A15C" Then: sForm = sForm & "96": Else: sForm = sForm & "105":
+'''''                            Case "40":
+'''''                                If ThisWorkbook.Worksheets(shName).Cells(vals, j).Value = "Large" Then 'Account for "Large" counts
+'''''                                    sForm = sForm & Chr(34) & "L" & Chr(34)
+'''''                                Else
+'''''                                    sForm = sForm & ThisWorkbook.Worksheets(shName).Cells(startline, j).Value
+'''''                                End If
+'''''                            Case "50":
+'''''                                If ThisWorkbook.Worksheets(shName).Cells(vals, j).Value = "Medium" Then 'Account for "Medium" counts
+'''''                                    sForm = sForm & Chr(34) & "M" & Chr(34)
+'''''                                Else
+'''''                                    sForm = sForm & ThisWorkbook.Worksheets(shName).Cells(startline, j).Value
+'''''                                End If
+'''''                            Case "60":
+'''''                                If ThisWorkbook.Worksheets(shName).Cells(vals, j).Value = "Small" Then 'Account for "Small" counts
+'''''                                    sForm = sForm & Chr(34) & "S" & Chr(34)
+'''''                                Else
+'''''                                    sForm = sForm & ThisWorkbook.Worksheets(shName).Cells(startline, j).Value
+'''''                                End If
+'''''                            Case "18", "28", "23", "27", "35", "20", "22", "32", "40", "36", "45", _
+'''''                                 "50", "48", "55", "56", "60", "64", "65", "72", "88", "90", "96", "105", "125":
+'''''                                    sForm = sForm & ThisWorkbook.Worksheets(shName).Cells(startline, j).Value
+'''''                        End Select
+'''''
+'''''                    ' --- Lemon sizes ---
+'''''                    Case "48", "56", "56 (36)", "56(36)", "64 (40)", "64(40)", "64 (70)", "64", "70", "75 (80)", "75", "80", "64(70)", "75(80)"
+'''''                        Select Case ThisWorkbook.Worksheets(shName).Cells(startline, j).Value
+'''''                            Case "56 (36)", "56(36)":
+'''''                                If Not ThisWorkbook.Worksheets(shName).Cells(vals, 8).Value = "A15C" Then: sForm = sForm & "36": Else: sForm = sForm & "56":
+'''''                            Case "64 (40)", "64(40)":
+'''''                                If Not ThisWorkbook.Worksheets(shName).Cells(vals, 8).Value = "A15C" Then: sForm = sForm & "40": Else: sForm = sForm & "64":
+'''''                            Case "64 (70)", "64(70)":
+'''''                                If Not ThisWorkbook.Worksheets(shName).Cells(vals, 8).Value = "A15C" Then: sForm = sForm & "70": Else: sForm = sForm & "64":
+'''''                            Case "75 (80)", "75(80)":
+'''''                                If Not ThisWorkbook.Worksheets(shName).Cells(vals, 8).Value = "A15C" Then: sForm = sForm & "80": Else: sForm = sForm & "75":
+'''''                            Case "88 (90)", "88(90)":
+'''''                                If Not ThisWorkbook.Worksheets(shName).Cells(vals, 8).Value = "A15C" Then: sForm = sForm & "90": Else: sForm = sForm & "88":
+'''''                            Case "100 (96)", "100(96)":
+'''''                                If Not ThisWorkbook.Worksheets(shName).Cells(vals, 8).Value = "A15C" Then: sForm = sForm & "96": Else: sForm = sForm & "100":
+'''''                            Case "48", "56", "64", "70", "75", "80", "88", "90", "100", "96", _
+'''''                                 "113", "138", "162", "189", "216"
+'''''                                sForm = sForm & ThisWorkbook.Worksheets(shName).Cells(startline, j).Value
+'''''                        End Select
+'''''
+'''''                    ' --- Pummelo sizes ---
+'''''                    Case "6", "8 (9)", "8 (10)", "8", "9", "10", "12", "8(9)", "8(10)"
+'''''                        Select Case ThisWorkbook.Worksheets(shName).Cells(startline, j).Value
+'''''                            Case "8 (9)", "8(9)":
+'''''                                If Not ThisWorkbook.Worksheets(shName).Cells(vals, 8).Value = "A15C" Then: sForm = sForm & "9": Else: sForm = sForm & "8":
+'''''                            Case "8 (10)", "8(10)":
+'''''                                If Not ThisWorkbook.Worksheets(shName).Cells(vals, 8).Value = "A15C" Then: sForm = sForm & "10": Else: sForm = sForm & "8":
+'''''                            Case "12 (12)", "12(12)": sForm = sForm & "12"
+'''''                            Case "14 (13)", "14(13)":
+'''''                                If Not ThisWorkbook.Worksheets(shName).Cells(vals, 8).Value = "A15C" Then: sForm = sForm & "13": Else: sForm = sForm & "14":
+'''''                            Case "18 (24)", "18(24)":
+'''''                                If Not ThisWorkbook.Worksheets(shName).Cells(vals, 8).Value = "A15C" Then: sForm = sForm & "24": Else: sForm = sForm & "18":
+'''''                            Case "23 (28)", "23(28)":
+'''''                                If Not ThisWorkbook.Worksheets(shName).Cells(vals, 8).Value = "A15C" Then: sForm = sForm & "28": Else: sForm = sForm & "23":
+'''''                            Case "6", "8", "9", "10", "12", "14", "13", "18", "24", "23", "28"
+'''''                                sForm = sForm & ThisWorkbook.Worksheets(shName).Cells(startline, j).Value
+'''''                        End Select
+'''''
+'''''                    ' --- Soft citrus X-code sizes (1X, 1XX, etc.) ---
+'''''                    Case "1XXXX", "1XXX", "1XX", "1X", "1", "2"
+'''''                        ' X-codes go into the formula as text (quoted)
+'''''                        sForm = sForm & Chr(34) & ThisWorkbook.Worksheets(shName).Cells(startline, j).Value & Chr(34)
+'''''                End Select
+
+''                sForm = sForm & GetSizeCriteria(shName, ansName, startline, j, vals, sPack)
+''
+''                ' Close the COUNTIFS parentheses and append the sPack / dispatch filter
+''                If sPack = "PACKHOUSE" Then
+''                    ' In Stock: subtract dispatched count from packhouse total
+''                    sForm = sForm & "),0)-" & charCheck(j + 64) & (vals + 5)
+''                Else
+''                    ' Dispatched: add dispatch match filter (Q col = 1)
+''                    sForm = sForm & ", " & ansName & "!$Q:$Q,1),0)"
+''                End If
+
+
+                ' ---------------------------------------------------------------
+                ' DOUBLED LINE CHECK (immediate neighbour)
+                ' If the next block (6 rows down) has identical attributes but
+                ' a different mark code ("D" prefix), subtract its dispatched
+                ' count to avoid double-counting pallets that span two pick runs.
+                ' ---------------------------------------------------------------
+                With ThisWorkbook.Worksheets(shName)
+                    ivalue = i - 3
+                    dval = i + 3
+                    If (dval < (vorRows - 5)) And _
+                       (.Cells(dval, 3).Value = .Cells(ivalue, 3).Value) And _
+                       (.Cells(dval, 5).Value = .Cells(ivalue, 5).Value) And _
+                       (.Cells(dval, 6).Value = .Cells(ivalue, 6).Value) And _
+                       (.Cells(dval, 7).Value = .Cells(ivalue, 7).Value) And _
+                       (.Cells(dval, 8).Value = .Cells(ivalue, 8).Value) And _
+                       (.Cells(dval, 9).Value = .Cells(ivalue, 9).Value) And _
+                       (.Cells(dval, 10).Value = .Cells(ivalue, 10).Value) And _
+                       (.Cells(dval, 11).Value = .Cells(ivalue, 11).Value) And _
+                       (.Cells(dval, 16).Value = "D" & .Cells(ivalue, 16).Value) And _
+                       (Not IsEmpty(.Cells(ivalue, 3))) Then
+                        If Not (Right(.Cells(ivalue + 1, j).Formula, 2) = "-0") Then
+                            .Cells(ivalue + 1, j).Formula = .Cells(ivalue + 1, j).Formula & "-" & charCheck(j + 64) & (dval + 3) & "-" & charCheck(j + 64) & (dval + 5) & "-0"
+                        End If
+                    End If
+                End With
+
+                ' ---------------------------------------------------------------
+                ' DOUBLED LINE CHECK (earlier in sheet)
+                ' Scan all earlier rows for an identical line (same attributes,
+                ' same mark code). If found, subtract those counts too.
+                ' This handles the case where the same variety/size appears
+                ' multiple times in the Pakplan (e.g. split across two batches).
+                ' ---------------------------------------------------------------
+                Dim dubdub As Boolean
+                dubdub = False
+                For k = 1 To (vorRows - 5)
+                    With ThisWorkbook.Worksheets(shName)
+                        If ((k < vals) And _
+                            (.Cells(vals, 3).Value = .Cells(k, 3).Value) And _
+                            (.Cells(vals, 5).Value = .Cells(k, 5).Value) And _
+                            (.Cells(vals, 6).Value = .Cells(k, 6).Value) And _
+                            (.Cells(vals, 7).Value = .Cells(k, 7).Value) And _
+                            (.Cells(vals, 8).Value = .Cells(k, 8).Value) And _
+                            (.Cells(vals, 9).Value = .Cells(k, 9).Value) And _
+                            (.Cells(vals, 10).Value = .Cells(k, 10).Value) And _
+                            (.Cells(vals, 11).Value = .Cells(k, 11).Value) And _
+                            (.Cells(vals, 16).Value = .Cells(k, 16).Value) And _
+                            ((Not IsEmpty(.Cells(vals, j))) And (Not IsEmpty(.Cells(k, j))))) Then
+                            ' Subtract the earlier row's Stock and Dispatched counts
+                            If sPack = "PACKHOUSE" Then
+                                sForm = sForm & "-" & charCheck(j + 64) & (k + 3) & "-" & charCheck(j + 64) & (k + 5)
+                                doubledCheck = doubledCheck + 1
+                            Else
+                                sForm = sForm & "-" & charCheck(j + 64) & (k + 5)
+                                doubledCheck = doubledCheck + 1
+                            End If
+                            dubdub = True
+                        End If
+
+                        ' Also check for the "D-prefix" neighbour pattern in earlier rows
+                        ivalue = k
+                        dval = k + 6
+                        If (k > 3) And (dval < (vorRows - 5)) And _
+                           (.Cells(dval, 3).Value = .Cells(ivalue, 3).Value) And _
+                           (.Cells(dval, 5).Value = .Cells(ivalue, 5).Value) And _
+                           (.Cells(dval, 6).Value = .Cells(ivalue, 6).Value) And _
+                           (.Cells(dval, 7).Value = .Cells(ivalue, 7).Value) And _
+                           (.Cells(dval, 8).Value = .Cells(ivalue, 8).Value) And _
+                           (.Cells(dval, 9).Value = .Cells(ivalue, 9).Value) And _
+                           (.Cells(dval, 10).Value = .Cells(ivalue, 10).Value) And _
+                           (.Cells(dval, 11).Value = .Cells(ivalue, 11).Value) And _
+                           (.Cells(dval, 16).Value = "D" & .Cells(ivalue, 16).Value) And _
+                           (Not IsEmpty(.Cells(ivalue, 3))) Then
+                            If Not (Right(.Cells(ivalue + 1, j).Formula, 2) = "-0") Then
+                                ' Currently shows a debug MsgBox - TODO: replace with logging
+                                MsgBox (.Cells(ivalue + 1, j).Value)
+                            End If
+                        End If
+
+                        ' Once we reach the current row, stop scanning
+                        If (k = vals) Then k = vorRows - 5
+                    End With
+                Next k
+
+                ' Write the completed formula to the cell
+                ThisWorkbook.Worksheets(shName).Cells(i, j).Formula = sForm
+
+            Next j   ' Next size column
+        End If   ' vals <> 0
+    Next i   ' Next Vordering row
+
+    ' --- Activate Vordering and force a recalc ---
+    ThisWorkbook.Worksheets(shName).Select
+    OptimizeVBA (False)
+    DoEvents
+    OptimizeVBA (True)
+    curper = totPerc
+
+    ' =========================================================================
+    ' SECOND PASS: Fix negative Outstanding values caused by doubled lines.
+    ' When doubledCheck > 0, some Outstanding rows may show negative values
+    ' because a duplicate line was counted twice and then subtracted.
+    ' This pass identifies those rows and redistributes Stock/Dispatched counts
+    ' between them until Outstanding = 0 (or as close as possible).
+    ' =========================================================================
+    If doubledCheck > 0 Then
+        For i = 1 To (vorRows - 5)
+
+            totPerc = curper + Round((i / (vorRows - 5)) * 7, 0)
+            If totPerc > 100 Then totPerc = 100
+            UserForm1.Label1.Caption = Str(totPerc) + "% Completed"
+            UserForm1.Label2.Width = totPerc * 2
+            UserForm1.Label3.Caption = "Finalizing..."
+            DoEvents
+
+            Dim isize As Integer
+
+            ' Find rows where Outstanding is negative (over-counted)
+            If (ThisWorkbook.Worksheets(shName).Cells(i, 12).Value = "Pallets Outstanding" And _
+                ThisWorkbook.Worksheets(shName).Cells(i, 16).Value < 0) Then
+
+                Dim stillLeft As Integer
+                stillLeft = 0
+                Dim arrNextCount() As Integer
+                Dim iNumb As Integer
+                iNumb = i - 2
+                ' Find the next occurrence of the same line (the duplicate)
+                For k = i To (vorRows - 5)
+                    With ThisWorkbook.Worksheets(shName)
+                        If ((.Cells(iNumb, 3).Value = .Cells(k, 3).Value) And _
+                            (.Cells(iNumb, 5).Value = .Cells(k, 5).Value) And _
+                            (.Cells(iNumb, 6).Value = .Cells(k, 6).Value) And _
+                            (.Cells(iNumb, 7).Value = .Cells(k, 7).Value) And _
+                            (.Cells(iNumb, 8).Value = .Cells(k, 8).Value) And _
+                            (.Cells(iNumb, 9).Value = .Cells(k, 9).Value) And _
+                            (.Cells(iNumb, 10).Value = .Cells(k, 10).Value) And _
+                            (.Cells(iNumb, 11).Value = .Cells(k, 11).Value) And _
+                            (.Cells(iNumb, 16).Value = .Cells(k, 16).Value) And _
+                            (Not IsEmpty(.Cells(iNumb, j))) And (Not IsEmpty(.Cells(k, j)))) Then
+                            stillLeft = stillLeft + 1
+                            isize = totCol - 17
+                            ReDim arrNextCount(isize)
+                            If stillLeft = 1 Then
+                                For j = 17 To totCol - 1
+                                    If Not IsEmpty(.Cells(k, j)) Then
+                                        If .Cells(k, j) = "*" Then
+                                            arrNextCount(j - 17) = 10000  ' "*" means unlimited
+                                        Else
+                                            arrNextCount(j - 17) = .Cells(k, j).Value
+                                        End If
+                                    Else
+                                        arrNextCount(j - 17) = 0
+                                    End If
+                                Next j
+                            End If
+                        End If
+                    End With
+
+                If stillLeft > 0 Then
+                    Dim arrDisp() As Integer, arrStock() As Integer
+                    Dim changable As Integer
+                    changable = 0
+                    Dim iNeed As Integer, iDisp As Integer, iOut As Integer, iStock As Integer
+                    isize = totCol - 17
+                    ReDim arrDisp(isize)
+                    ReDim arrStock(isize)
+                    iNeed = ThisWorkbook.Worksheets(shName).Cells(i - 1, 16).Value
+                    iOut = ThisWorkbook.Worksheets(shName).Cells(i, 16).Value
+                    iStock = ThisWorkbook.Worksheets(shName).Cells(i + 1, 16).Value
+                    iDisp = ThisWorkbook.Worksheets(shName).Cells(i + 3, 16).Value
+
+                    ' --- Phase 1: Reduce Dispatched to match Needed ---
+                    ' If more was dispatched than needed, move some back to Stock
+                    If ThisWorkbook.Worksheets(shName).Cells(i + 3, 16).Value > ThisWorkbook.Worksheets(shName).Cells(i - 1, 16).Value Then
+                        For j = 17 To totCol - 1
+                            arrStock(j - 17) = ThisWorkbook.Worksheets(shName).Cells(i + 1, j).Value
+                            arrDisp(j - 17) = ThisWorkbook.Worksheets(shName).Cells(i + 3, j).Value
+                            If arrNextCount(j - 17) > 0 Then
+                                changable = changable + ThisWorkbook.Worksheets(shName).Cells(i + 3, j).Value
+                            End If
+                        Next j
+                        Do Until (iDisp = iNeed) Or (changable = 0)
+                            For j = 17 To totCol - 1
+                                If arrNextCount(j - 17) > 0 Then
+                                    If iDisp > iNeed Then
+                                        If arrDisp(j - 17) > ThisWorkbook.Worksheets(shName).Cells(i - 1, j).Value Then
+                                            arrDisp(j - 17) = arrDisp(j - 17) - 1
+                                            arrStock(j - 17) = arrStock(j - 17) + 1
+                                            ThisWorkbook.Worksheets(shName).Cells(i + 3, j).Value = ThisWorkbook.Worksheets(shName).Cells(i + 3, j).Value - 1
+                                            iDisp = iDisp - 1
+                                            changable = changable - 1
+                                        End If
+                                    End If
+                                End If
+                            Next j
+                        Loop
+                        ' Clear stock row values that were moved to dispatched
+                        For j = 17 To totCol - 1
+                            If arrStock(j - 17) > 0 Then
+                                arrStock(j - 17) = 0
+                                ThisWorkbook.Worksheets(shName).Cells(i + 1, j).Value = 0
+                            End If
+                        Next j
+                        OptimizeVBA (False)
+                        DoEvents
+                        OptimizeVBA (True)
+                    End If
+
+                    ' --- Phase 2: Reduce Stock to resolve remaining negative Outstanding ---
+                    changable = 0
+                    iNeed = ThisWorkbook.Worksheets(shName).Cells(i - 1, 16).Value
+                    iOut = ThisWorkbook.Worksheets(shName).Cells(i, 16).Value
+                    iStock = ThisWorkbook.Worksheets(shName).Cells(i + 1, 16).Value
+                    iDisp = ThisWorkbook.Worksheets(shName).Cells(i + 3, 16).Value
+                    For j = 17 To totCol - 1
+                        arrStock(j - 17) = ThisWorkbook.Worksheets(shName).Cells(i + 1, j).Value
+                        arrDisp(j - 17) = ThisWorkbook.Worksheets(shName).Cells(i + 3, j).Value
+                        If arrNextCount(j - 17) > 0 Then
+                            changable = changable + ThisWorkbook.Worksheets(shName).Cells(i + 1, j).Value
+                        End If
+                    Next j
+                    If (iStock + iDisp) > iNeed Then
+                        Do Until (iOut = 0) Or (changable = 0)
+                            For j = 17 To totCol - 1
+                                If arrNextCount(j - 17) > 0 Then
+                                    If arrStock(j - 17) > 0 Then
+                                        ThisWorkbook.Worksheets(shName).Cells(i + 1, j).Value = ThisWorkbook.Worksheets(shName).Cells(i + 1, j).Value - 1
+                                        arrStock(j - 17) = arrStock(j - 17) - 1
+                                        iStock = iStock - 1
+                                        iOut = iOut + 1
+                                        changable = changable - 1
+                                    End If
+                                End If
+                                If iOut = 0 Then j = totCol - 1   ' Early exit once resolved
+                            Next j
+                        Loop
+                        OptimizeVBA (False)
+                        DoEvents
+                        OptimizeVBA (True)
+                    End If
+                End If   ' stillLeft > 0
+                
+                Next k
+            End If   ' Pallets Outstanding < 0
+        Next i
+    End If   ' doubledCheck > 0
+
+    OptimizeVBA (False)
+    If ribref Then UserForm1.Hide
+
+End Sub
+
+
+' =============================================================================
+' COPY_STUFF
+' Copies the entire Vordering sheet range (A1 through to 2 columns past TOTAL)
+' to the clipboard. Used as a quick manual clipboard helper.
+' =============================================================================
+Public Sub Copy_Stuff()
+    Dim finalcol As Integer
+    Dim finRow As Integer
+    finalcol = ThisWorkbook.Worksheets("Vordering").Range("Q" & startline & ":AZ" & startline).Find("TOTAL", , xlValues, xlWhole).Column + 2
+    finRow = ThisWorkbook.Worksheets("Vordering").Cells.Find("*", SearchOrder:=xlByRows, SearchDirection:=xlPrevious).Row
+    ThisWorkbook.Worksheets("Vordering").Range("A1:" & charCheck(finalcol + 64) & finRow).Copy
+End Sub
+
+
+' =============================================================================
+' RIBBON WRAPPER: Export_Stuff_R
+' =============================================================================
+Public Sub Export_Stuff_R(control As IRibbonControl)
+    Export_Stuff
+End Sub
+
+
+' =============================================================================
+' EXPORT_STUFF
+' Saves a clean export copy of the workbook (values only for Vordering and
+' Opsomming; full copy for Pakplan and Grafieke), then emails it.
+'
+' WHAT IT DOES:
+'   1. Asks the user to confirm Save & Send.
+'   2. Creates a new workbook.
+'   3. Copies Pakplan sheet fully (with formulas and formatting).
+'   4. Copies Vordering as values+formats only (no live formulas).
+'      Deletes the top rows above startline-3 (internal control rows).
+'   5. Copies Opsomming as values+formats only.
+'   6. Copies Grafieke sheet with charts intact.
+'   7. Saves the new workbook to the path defined by mSave + variety + filename.
+'   8. Calls Mail_Stuff to send it via Outlook (unless on the server PC).
+'
+' FILE NAMING:
+'   [mSave]\[variety]\[tName] Pakplan Vordering [WeekNumb].xlsx
+'   e.g. C:\Reports\HVN\Havalina Pakplan Vordering Week 7.xlsx
+'
+' NOTE: If run on "PALTRACK-PC" (the server), no email is sent because
+'       Outlook is not set up there. A reminder message is shown instead.
+' =============================================================================
+Public Sub Export_Stuff()
+    InitiateConstants
+
+    Dim answ As String
+    answ = MsgBox("Do you want to Save & Send?", vbQuestion + vbYesNo, "User Response")
+
+    If answ = "6" Then   ' User confirmed
+        Dim wbSource As Workbook, wbNew As Workbook
+        Dim wsCopy As Worksheet, wsValues As Worksheet
+        Dim wsSummary As Worksheet, wsChart As Worksheet, wsNew As Worksheet
+        Dim tlen As Integer, i As Integer
+        Dim rng As Range, col As Range
+        Dim SavePath As String
+        Dim tempN As String
+
+        Application.ScreenUpdating = False
+        vari = ThisWorkbook.Worksheets("Vordering").Cells(4, 4).Value
+
+        Set wbSource = ThisWorkbook
+        Set wsCopy = wbSource.Worksheets("Pakplan")
+        Set wsValues = wbSource.Worksheets("Vordering")
+        Set wsSummary = wbSource.Worksheets("Opsomming")
+        Set wsChart = wbSource.Worksheets("Grafieke")
+
+        ' --- Parse tName: extract the pack type name from the Pakplan title cell ---
+        ' The title cell contains something like "Havalina Pakplan Vordering Week 7"
+        ' We want just "Havalina" (everything before the word "PACK")
+        tName = ""
+        tempN = wsValues.Range("A" & (startline - 2)).Value
+        tlen = Len(tempN)
+        For i = 1 To tlen
+            tName = Mid(tempN, i, 4)
+            If UCase(tName) = "PACK" Then
+                tName = Left(tempN, i - 2)
+                i = tlen   ' Exit loop
+            End If
+        Next i
+
+        ' Sanitise tName by replacing invalid filename characters
+        Dim invalidChars As Variant, chch As Variant
+        invalidChars = Array("\", "/", ":", "*", "?", """", "<", ">", "|")
+        For Each chch In invalidChars
+            tName = Replace(tName, chch, " ")
+        Next chch
+        tName = StrConv(tName, vbProperCase)
+
+        ' --- Parse WeekNumb: extract the week number from the title cell ---
+        ' Looks for the word "WEEK" and takes the 2 characters after "WEEK "
+        WeekNumb = ""
+        tempN = wsValues.Range("A" & (startline - 2)).Value
+        tlen = Len(tempN)
+        For i = 1 To tlen
+            WeekNumb = Mid(tempN, i, 4)
+            If UCase(WeekNumb) = "WEEK" Then
+                WeekNumb = Mid(tempN, i + 5, 2)
+                i = tlen
+            End If
+        Next i
+        If Not (IsNumeric(WeekNumb)) Then WeekNumb = Left(WeekNumb, 1)
+        weeknumber = WeekNumb
+        WeekNumb = "Week " & WeekNumb
+
+        ' Build the save path
+        SavePath = mSave & vari & "\" & tName & " Pakplan Vordering " & WeekNumb & ".xlsx"
+
+        ' --- Create new export workbook ---
+        Set wbNew = Workbooks.Add
+
+        ' Copy Pakplan sheet (full, with formulas)
+        wsCopy.Copy Before:=wbNew.Sheets(1)
+        wbNew.Sheets(1).Name = wsCopy.Name
+
+        ' Copy Vordering as values + formats (no live formulas in exported file)
+        Set wsNew = wbNew.Sheets.Add(After:=wbNew.Sheets(wbNew.Sheets.Count))
+        wsNew.Name = wsValues.Name
+        wsValues.Cells.Copy
+        wsNew.Cells.PasteSpecial Paste:=xlPasteValues
+        wsNew.Cells.PasteSpecial Paste:=xlPasteFormats
+        Application.CutCopyMode = False
+        For Each col In wsValues.UsedRange.Columns
+            wsNew.Columns(col.Column).ColumnWidth = wsValues.Columns(col.Column).ColumnWidth
+        Next col
+        ' Remove the internal control rows (above the visible data header)
+        If startline - 3 > 0 Then wsNew.Rows("1:" & (startline - 3)).Delete
+        wsNew.Range("A1").Select
+
+        ' Copy Opsomming as values + formats
+        Set wsNew = wbNew.Sheets.Add(After:=wbNew.Sheets(wbNew.Sheets.Count))
+        wsNew.Name = wsSummary.Name
+        wsSummary.Cells.Copy
+        wsNew.Cells.PasteSpecial Paste:=xlPasteValues
+        wsNew.Cells.PasteSpecial Paste:=xlPasteFormats
+        Application.CutCopyMode = False
+        For Each col In wsSummary.UsedRange.Columns
+            wsNew.Columns(col.Column).ColumnWidth = wsSummary.Columns(col.Column).ColumnWidth
+        Next col
+        wsNew.Range("A1").Select
+
+        ' Copy Grafieke (charts) - full copy to preserve chart objects
+        wsChart.Copy After:=wbNew.Sheets(wbNew.Sheets.Count)
+        wbNew.Sheets(wbNew.Sheets.Count).Name = wsChart.Name
+
+        ' Set view and delete the default empty Sheet1
+        wbNew.Sheets("Vordering").Select
+        wbNew.Sheets("Vordering").Range("A1").Select
+        ActiveWindow.Zoom = 80
+        Application.DisplayAlerts = False
+        wbNew.Worksheets("Sheet1").Delete
+        If Dir(SavePath) <> "" Then Kill SavePath  ' Delete if file already exists
+        wbNew.SaveAs Filename:=SavePath, FileFormat:=xlOpenXMLWorkbook
+        Application.DisplayAlerts = True
+        wbNew.Close SaveChanges:=False
+
+        Application.ScreenUpdating = True
+
+        ' Notify user and send email (skip email on server PC)
+        If Environ("COMPUTERNAME") = "PALTRACK-PC" Then
+            MsgBox ("No email is set up on the server, please copy saved file and download to device with a valid email to send from.")
+            MsgBox "Workbook saved as " & SavePath, vbInformation, "Export Complete"
+        Else
+            MsgBox "Workbook saved as " & SavePath, vbInformation, "Export Complete"
+            Mail_Stuff SavePath, weeknumber
+        End If
+    End If
+
+End Sub
+
+
+' =============================================================================
+' MAIL_STUFF
+' Creates and displays a pre-populated Outlook email with the exported
+' workbook as an attachment.
+'
+' PARAMETERS:
+'   sPath - Full path to the saved export file
+'   wkn   - Week number (Integer) used in the email subject and body
+'
+' NOTE: The email is DISPLAYED (not auto-sent) so the user can review it
+'       before sending. This is intentional for quality control.
+'
+' The greeting text differs between "Ohr" (Afrikaans, no "Groete" sign-off)
+' and "Junction" (Afrikaans, includes "Groete"). This is determined by
+' checking mBCC against a known email address.
+' TODO: Consider a more robust way to distinguish these contexts (maybe
+'       a named cell or constant instead of checking an email address).
+' =============================================================================
+Sub Mail_Stuff(sPath As String, wkn As Integer)
+    Dim OutApp As Object
+    Dim OutMail As Object
+    Dim sVar As String
+    Dim pos As Integer
+    pos = InStrRev(sPath, "\")
+    sVar = Mid(sPath, pos - 3, 3)
+
+    ' Record the send timestamp in the Data sheet ribbon label cell
+    ThisWorkbook.Worksheets("Data").Select
+    OptimizeVBA (False)
+    ThisWorkbook.Worksheets("Data").Range("X1").Value = "Last Sent: " & Now()
+    DoEvents
+    ForceRibbonRefresh
+    OptimizeVBA (True)
+
+    Set OutApp = CreateObject("Outlook.Application")
+    Set OutMail = OutApp.CreateItem(0)   ' 0 = olMailItem
+
+    On Error Resume Next
+    With OutMail
+        .To = mTo
+        .CC = mCC
+        .BCC = mBCC
+        .Subject = sVar & " Pakplan Vordering Week " & wkn
+        .Display   ' Show the email for review before sending
+        ' Set email body based on context (Ohr vs Junction)
+        If mBCC = "REDACTED-EMAIL" Then
+            ' Ohr context: no sign-off line
+            .HTMLBody = "<font style=""font-family: Aptos; font-size: 13pt;"">Goeiedag,<br><br>Sien aangeheg die Pakplan Vordering vir Week " & wkn & ".</font>" & .HTMLBody
+        Else
+            ' Junction context: include "Groete" sign-off
+            .HTMLBody = "<font style=""font-family: Aptos; font-size: 13pt;"">Goeiedag,<br><br>Sien aangeheg die Pakplan Vordering vir Week " & wkn & ".<br><br>Groete</font>" & .HTMLBody
+        End If
+        .Attachments.Add sPath
+    End With
+    On Error GoTo 0
+
+    ' Re-enable events and screen updating
+    With Application
+        .EnableEvents = True
+        .ScreenUpdating = True
+    End With
+    Set OutMail = Nothing
+    Set OutApp = Nothing
+
+    ThisWorkbook.Worksheets("Vordering").Select
+    OptimizeVBA (False)
+End Sub
+
+
+' =============================================================================
+' RIBBON WRAPPER: Short_Stuff_R
+' =============================================================================
+Public Sub Short_Stuff_R(control As IRibbonControl)
+    Short_Stuff
+End Sub
+
+
+' =============================================================================
+' SHORT_STUFF
+' Builds or rebuilds the "Opsomming" (Summary) sheet.
+'
+' WHAT IT DOES:
+' Reads the Vordering sheet and extracts one row per packing line into
+' Opsomming, showing:
+'   - Columns A-P: copied directly from the Vordering data row
+'   - Columns Q onwards (size columns): shows Stock + Dispatched totals
+'     (i.e. how many were actually packed, to compare against the plan)
+'   - Final column (STILL NEED): the Outstanding value from column P
+'
+' Rows where Outstanding = 0 are highlighted green.
+' Also applies borders and alignment.
+'
+' NOTE: For columns >= 81 (past column Q in ASCII), the value shown is
+'       Stock (i+1) + Dispatched (i+3) rather than the "Needed" row,
+'       because that reflects actual production better for reporting.
+' =============================================================================
+Sub Short_Stuff()
+
+    shName = "Vordering"
+    Dim short As String
+    Dim sanswer As String
+    Dim checkLoad As Boolean
+    Dim prog As Double
+    Dim iRows As Integer
+
+    checkLoad = False
+    short = "Opsomming"
+    sanswer = "6"
+    totCol = Sheets(shName).Range("Q" & startline & ":AZ" & startline).Find("TOTAL", , xlValues, xlWhole).Column + 64
+    iRows = (Sheets(shName).Range("A" & startline & ":A" & 1000).Find("GRAND TOTA*", , xlValues, xlWhole).Row + 5) * 3
+
+    ' Create the sheet if needed, otherwise just select it
+    If Not sheetExists(short) Then
+        ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count)).Name = short
+        sanswer = "6"
+    Else
+        ThisWorkbook.Sheets(short).Select
+    End If
+
+    ' Show progress bar if called standalone
+    If (totPerc = 0) Or (IsEmpty(totPerc)) Then
+        UserForm1.Show (False)
+        UserForm1.Width = 220
+        UserForm1.Frame1.Width = 200
+        UserForm1.Height = 98
+        UserForm1.StartUpPosition = 0
+        UserForm1.Caption = "Progress Bar"
+        UserForm1.Label1.Caption = "0% Completed"
+        UserForm1.Label2.Caption = ""
+        UserForm1.Label3.Caption = "Routing to Summary..."
+        UserForm1.Label2.Width = 0
+        UserForm1.Label2.Height = UserForm1.Frame1.Height - 4
+        UserForm1.Label2.BackColor = vbRed
+        UserForm1.Frame1.Caption = ""
+        checkLoad = True
+    End If
+
+    If sanswer = "6" Then
+        ' Clear old data from summary sheet
+        ThisWorkbook.Worksheets(short).Rows(1 & ":" & Round(iRows / 5)).Delete
+        OptimizeVBA (True)
+
+        ' Copy the header row from Vordering to Opsomming row 1
+        Sheets(shName).Range("A" & startline & ":" & charCheck(totCol) & startline).Copy _
+            Destination:=Sheets(short).Range("A" & 1).End(xlUp)
+        ' Copy column widths to match
+        Sheets(shName).Range("A" & startline & ":" & charCheck(totCol) & startline).Copy
+        Sheets(short).Range("A" & startline & ":" & charCheck(totCol) & startline).PasteSpecial xlPasteColumnWidths
+
+        ' Style the header row with borders
+        With Sheets(short).Range("A" & 1 & ":" & charCheck(totCol) & 1).Borders()
+            .LineStyle = xlContinuous
+            .Color = vbBlack
+            .Weight = xlMedium
+        End With
+
+        ' Add a "STILL NEED" column header in the last column
+        Sheets(short).Range(charCheck(totCol) & "1").Value = "STILL NEED"
+        Sheets(short).Range(charCheck(totCol) & "1").WrapText = True
+
+        ' Find the last row of data in Vordering
+        Dim FinCell As Range, finRow As Integer
+        Set FinCell = ThisWorkbook.Worksheets(shName).Cells.Find("*", SearchOrder:=xlByRows, SearchDirection:=xlPrevious)
+        finRow = FinCell.Row
+
+        Dim i As Integer, j As Integer, m As Integer
+        Dim k As Integer
+        k = 1   ' Current row in Opsomming (starts at 1 = header)
+
+        Dim sLine(16) As String
+
+        ' --- Main loop: copy "Pallets Outstanding" rows from Vordering to Opsomming ---
+        For i = startline To finRow
+
+            ' Update progress bar
+            prog = (i - startline) / (finRow - startline)
+            UserForm1.Label2.BackColor = GetProgressColor(CDbl(prog))
+            If checkLoad = True Then
+                totPerc = Round((i / finRow) * 100, 0)
+                If totPerc > 100 Then totPerc = 100
+                UserForm1.Label1.Caption = Str(totPerc) + "% Completed"
+                UserForm1.Label2.Width = totPerc * 2
+                UserForm1.Label3.Caption = "Updating Summary..."
+                DoEvents
+            End If
+
+            ' Only process "Pallets Outstanding" rows
+            If Sheets(shName).Range("L" & i).Value = "Pallets Outstanding" Then
+                k = k + 1
+
+                ' Copy all columns for this row
+                For j = 65 To (totCol - 1)
+                    If j < 81 Then
+                        ' Columns A-P (ASCII 65-80): copy directly from the data row (i-2)
+                        Sheets(short).Range(charCheck(j) & k).Value = Sheets(shName).Range(charCheck(j) & (i - 2)).Value
+                    Else
+                        ' Size columns (Q onwards): show Stock + Dispatched (packed so far)
+                        If Sheets(shName).Range(charCheck(j) & (i + 1)).Value + Sheets(shName).Range(charCheck(j) & (i + 3)).Value > 0 Then
+                            Sheets(short).Range(charCheck(j) & k).Value = _
+                                Sheets(shName).Range(charCheck(j) & (i + 1)).Value + _
+                                Sheets(shName).Range(charCheck(j) & (i + 3)).Value
+                        Else
+                            Sheets(short).Range(charCheck(j) & k).Formula = ""
+                        End If
+                    End If
+                Next j
+
+                ' Apply borders to this summary row
+                With Sheets(short).Range("A" & k & ":" & charCheck(totCol) & k).Borders()
+                    .LineStyle = xlContinuous
+                    .Color = vbBlack
+                    .Weight = xlThin
+                End With
+                ' Medium border on the right of col P (separates info from size columns)
+                With Sheets(short).Range("P" & k & ":P" & k).Borders(xlRight)
+                    .LineStyle = xlContinuous
+                    .Color = vbBlack
+                    .Weight = xlMedium
+                End With
+                ' Medium borders around the STILL NEED column
+                With Sheets(short).Range(charCheck(totCol) & k).Borders(xlLeft)
+                    .LineStyle = xlContinuous
+                    .Color = vbBlack
+                    .Weight = xlMedium
+                End With
+                With Sheets(short).Range(charCheck(totCol) & k).Borders(xlRight)
+                    .LineStyle = xlContinuous
+                    .Color = vbBlack
+                    .Weight = xlMedium
+                End With
+
+                ' Write Outstanding value in the STILL NEED column
+                Sheets(short).Range(charCheck(totCol) & k).Value = Sheets(shName).Range("P" & i).Value
+
+                ' Highlight green if nothing is outstanding
+                If Sheets(short).Range(charCheck(totCol) & k).Value = 0 Then
+                    Sheets(short).Range(charCheck(totCol) & k).Interior.Color = RGB(70, 170, 100)
+                End If
+
+            End If
+        Next i
+
+        ' Centre-align all size columns in Opsomming
+        Sheets(short).Range("Q1:" & charCheck(totCol) & k).HorizontalAlignment = xlCenter
+
+        ' Medium top border on the last data row and the row after (visual separator)
+        With Sheets(short).Range("A" & k & ":" & charCheck(totCol) & k).Borders(xlTop)
+            .LineStyle = xlContinuous
+            .Color = vbBlack
+            .Weight = xlMedium
+        End With
+        With Sheets(short).Range("A" & k + 1 & ":" & charCheck(totCol) & k + 1).Borders(xlTop)
+            .LineStyle = xlContinuous
+            .Color = vbBlack
+            .Weight = xlMedium
+        End With
+
+    End If  ' sanswer = "6"
+
+    OptimizeVBA (False)
+    ThisWorkbook.Worksheets(short).Select
+    If checkLoad = True Then UserForm1.Hide
+
+    ' Clear clipboard and return to top of sheet
+    Sheets(short).Range("AZ1").Copy
+    ThisWorkbook.Worksheets(short).Range("A1").Select
+    totPerc = 0
+
+End Sub
+
+
+' =============================================================================
+' RIBBON WRAPPER: Chart_Stuff_R
+' =============================================================================
+Public Sub Chart_Stuff_R(control As IRibbonControl)
+    Chart_Stuff
+End Sub
+
+
+' =============================================================================
+' CHART_STUFF
+' Builds or rebuilds the "Grafieke" (Charts) sheet.
+'
+' WHAT IT DOES:
+' For each packing line in Vordering, creates a small pie chart showing:
+'   - Green slice:  Pallets Packed (Stock + Dispatched)
+'   - Yellow slice: Pallets Outstanding
+'   - Red slice:    Pallets Overpacked
+'
+' Charts are laid out in a grid (6 columns wide) with each chart 180x140 px.
+' The chart title includes: variety - pack - grade - batch number (and mark if present).
+'
+' Data is read from the column identified as "BATC*" (the Batch NR column)
+' since that column's row offsets conveniently map to each of the 5 sub-rows
+' via the 6-row block structure.
+'
+' NOTE: Items with zero pallets needed are shown as an empty chart with "0"
+'       label, to maintain the grid position for all items.
+' =============================================================================
+Sub Chart_Stuff()
+
+    shName = "Vordering"
+    Dim sanswer As String
+    Dim sChart As String
+    Dim iItems As Integer
+    Dim i As Integer
+    Dim checkLoad As Boolean
+    Dim prog As Double
+    Dim needed As Double
+    Dim outstanding As Double
+    Dim inStock As Double
+    Dim dispatched As Double
+    Dim overpacked As Double
+    Dim batCol As Integer
+    Dim datArray As Variant
+    Dim namArray As Variant
+    Dim topOffset As Double
+    Dim leftOffset As Double
+    Dim rowMax As Long: rowMax = 6   ' Number of chart columns in the grid
+    Dim chartObj As ChartObject
+    checkLoad = False
+
+    ' Locate the BATCH NR column in Vordering (the reference column for reading row offsets)
+    batCol = Sheets(shName).Range("A" & startline & ":AZ" & startline).Find("BATC*", , xlValues, xlWhole).Column + 64
+
+    ' Count the number of packing lines (items) = rows between startline and GRAND TOTAL, divided by block size (6)
+    iItems = (Sheets(shName).Range("A" & startline & ":A" & 1000).Find("GRAND TOTA*", , xlValues, xlWhole).Row - startline - 1) / 6
+
+    sChart = "Grafieke"
+    OptimizeVBA (True)
+
+    ' Create the charts sheet if it doesn't exist
+    If Not sheetExists(sChart) Then
+        ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count)).Name = sChart
+    Else
+        ThisWorkbook.Sheets(sChart).Select
+    End If
+
+    ' Delete all existing charts on the sheet before rebuilding
+    For Each chartObj In ThisWorkbook.Sheets(sChart).ChartObjects
+        chartObj.Delete
+    Next
+
+    ' Show progress bar if called standalone
+    If (totPerc = 0) Or (IsEmpty(totPerc)) Then
+        UserForm1.Show (False)
+        UserForm1.Width = 220
+        UserForm1.Frame1.Width = 200
+        UserForm1.Height = 98
+        UserForm1.StartUpPosition = 0
+        UserForm1.Caption = "Progress Bar"
+        UserForm1.Label1.Caption = "0% Completed"
+        UserForm1.Label2.Caption = ""
+        UserForm1.Label3.Caption = "Routing to Charts..."
+        UserForm1.Label2.Width = 0
+        UserForm1.Label2.Height = UserForm1.Frame1.Height - 4
+        UserForm1.Label2.BackColor = vbRed
+        UserForm1.Frame1.Caption = ""
+        checkLoad = True
+    End If
+
+    ' --- Main loop: create one pie chart per packing line ---
+    For i = 1 To iItems
+
+        ' Update progress bar
+        prog = (i - 1) / (iItems - 1)
+        UserForm1.Label2.BackColor = GetProgressColor(CDbl(prog))
+        If checkLoad = True Then
+            totPerc = Round((i / iItems) * 100, 0)
+            If totPerc > 100 Then totPerc = 100
+            UserForm1.Label1.Caption = Str(totPerc) + "% Completed"
+            UserForm1.Label2.Width = totPerc * 2
+            UserForm1.Label3.Caption = "Updating Charts..."
+            DoEvents
+        End If
+
+        ' Read pallet counts from the Vordering block for this item.
+        ' Row offset formula: 6*i - startline + sub-row offset
+        '   +3 = Pallets Outstanding row
+        '   +4 = Pallets in Stock row
+        '   +5 = Pallets Overpacked row
+        '   +6 = Pallets Dispatched row
+        With ThisWorkbook.Worksheets(shName)
+            needed = .Cells(6 * i - startline + 2, charCheck(batCol)).Value
+            outstanding = .Cells(6 * i - startline + 3, charCheck(batCol)).Value
+            If outstanding < 0 Then outstanding = 0   ' Don't show negative outstanding
+            inStock = .Cells(6 * i - startline + 4, charCheck(batCol)).Value
+            dispatched = .Cells(6 * i - startline + 6, charCheck(batCol)).Value
+            overpacked = .Cells(6 * i - startline + 5, charCheck(batCol)).Value
+            If (overpacked > 0) And (inStock > needed) Then inStock = needed
+        End With
+
+        ' Chart data: Packed (in stock + dispatched), Outstanding, Overpacked
+        datArray = Array(inStock + dispatched, outstanding, overpacked)
+        namArray = Array("Packed", "Outstanding", "Overpack")
+
+        ' Calculate position in the grid (6 charts per row)
+        leftOffset = ((i - 1) Mod rowMax) * 185
+        topOffset = Int((i - 1) / rowMax) * 145
+
+        ' Create the chart object
+        Set chartObj = ThisWorkbook.Sheets(sChart).ChartObjects.Add( _
+            Left:=leftOffset, Top:=topOffset, Width:=180, Height:=140)
+
+        ' Configure the pie chart
+        With chartObj.Chart
+            .ChartType = xlPie
+            .SeriesCollection.NewSeries
+            With .SeriesCollection(1)
+                .ApplyDataLabels Type:=xlDataLabelsShowLabel
+                .HasDataLabels = True
+                ' If nothing was packed or needed, show a zero chart
+                If inStock + dispatched + outstanding = 0 Then
+                    .Values = Array(1, 0, 0)
+                    .Points(1).DataLabel.text = "0"
+                Else
+                    .Values = datArray
+                End If
+                .XValues = namArray
+                ' Slice colours: Green=Packed, Yellow=Outstanding, Red=Overpacked
+                .Points(1).Format.Fill.ForeColor.RGB = RGB(0, 170, 0)
+                .Points(2).Format.Fill.ForeColor.RGB = RGB(220, 220, 0)
+                .Points(3).Format.Fill.ForeColor.RGB = RGB(220, 0, 0)
+                .DataLabels.ShowValue = True
+                .DataLabels.ShowCategoryName = False
+                .DataLabels.Font.Bold = True
+                .DataLabels.Font.Size = 11
+                ' Remove data labels for zero slices (keeps chart clean)
+                Dim pt As Point
+                For Each pt In .Points
+                    If pt.DataLabel.text = "0" Then pt.DataLabel.Delete
+                Next pt
+            End With
+            ' Chart title: variety - pack - grade - batch (and mark if present)
+            .HasTitle = True
+            .ChartTitle.Format.TextFrame2.TextRange.Font.Size = 10
+            .ChartTitle.text = _
+                ThisWorkbook.Worksheets(shName).Cells(6 * i - startline + 1, charCheck(batCol - 13)).Value & " - " & _
+                ThisWorkbook.Worksheets(shName).Cells(6 * i - startline + 1, charCheck(batCol - 11)).Value & " - Grade " & _
+                ThisWorkbook.Worksheets(shName).Cells(6 * i - startline + 1, charCheck(batCol - 10)).Value & " - " & _
+                ThisWorkbook.Worksheets(shName).Cells(6 * i - startline + 1, charCheck(batCol)).Value
+            ' Append the mark code if it's present
+            If ThisWorkbook.Worksheets(shName).Cells(6 * i - startline + 1, charCheck(batCol - 7)).Value <> "" Then
+                .ChartTitle.text = .ChartTitle.text & " - " & _
+                    ThisWorkbook.Worksheets(shName).Cells(6 * i - startline + 1, charCheck(batCol - 7)).Value
+            End If
+            .HasLegend = True
+            .Legend.Font.Size = 9
+        End With
+
+    Next i
+
+    OptimizeVBA (False)
+    If checkLoad = True Then UserForm1.Hide
+    totPerc = 0
+
+End Sub
+
+
+' =============================================================================
+' OPTIMIZE_VBA
+' Toggles Excel performance optimisations on or off.
+' Call OptimizeVBA(True) before a long operation and OptimizeVBA(False) after.
+'
+' WHAT IT DOES:
+'   isOn = True:  Manual calculation + events/screen updating OFF (faster)
+'   isOn = False: Automatic calculation + events/screen updating ON (normal)
+'
+' IMPORTANT: Always call OptimizeVBA(False) in error handlers or at the end
+'            of every sub that calls OptimizeVBA(True), otherwise Excel will
+'            be left in a non-responsive state.
+' =============================================================================
+Public Sub OptimizeVBA(isOn As Boolean)
+    Application.Calculation = IIf(isOn, xlCalculationManual, xlCalculationAutomatic)
+    Application.EnableEvents = Not (isOn)
+    Application.ScreenUpdating = Not (isOn)
+End Sub
+
