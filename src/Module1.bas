@@ -2250,7 +2250,7 @@ Sub Mail_Stuff(sPath As String, wkn As Integer)
         .Subject = sVar & " Pakplan Vordering Week " & wkn
         .Display   ' Show the email for review before sending
         ' Set email body based on context (Ohr vs Junction)
-        If mBCC = "REDACTED-EMAIL" Then
+        If mContext = "Ohr" Then
             ' Ohr context: no sign-off line
             .HTMLBody = "<font style=""font-family: Aptos; font-size: 13pt;"">Goeiedag,<br><br>Sien aangeheg die Pakplan Vordering vir Week " & wkn & ".</font>" & .HTMLBody
         Else
