@@ -65,12 +65,15 @@ Const startline As Integer = 3
 
 
 ' =============================================================================
-' WORKBOOK OPEN
-' Runs automatically when the workbook is opened.
+' ENSURE DATA SHEET DEFAULTS
+' Called for real from ThisWorkbook.Workbook_Open on every file open, and
+' defensively re-checked here (via sheetExists) at the top of Update_Stuff
+' in case the Data sheet was deleted, or macros were disabled at open and
+' only enabled afterwards.
 ' Ensures the "Data" sheet exists and initialises key control cells used
 ' throughout the system (ribbon state, pick reference anchors, etc.).
 ' =============================================================================
-Private Sub Workbook_Open()
+Public Sub EnsureDataSheetDefaults()
 
     ' Create the Data sheet if it doesn't exist yet
     If Not sheetExists("Data") Then
@@ -1073,7 +1076,7 @@ Public Sub Update_Stuff()
 
     ' Ensure the Data and Vordering sheets exist
     If Not sheetExists(ansName) Then
-        Workbook_Open
+        EnsureDataSheetDefaults
     Else
         ThisWorkbook.Worksheets(ansName).Visible = xlSheetVisible
     End If
