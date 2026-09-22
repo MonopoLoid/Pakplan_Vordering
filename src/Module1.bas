@@ -554,6 +554,7 @@ End Sub
 '   stdcol      = column index of the "STD" column in Pakplan
 ' =============================================================================
 Public Sub Setup_Stuff()
+    On Error GoTo ErrHandler
     InitiateConstants
 
     ' --- Configure progress bar UserForm ---
@@ -997,6 +998,9 @@ Public Sub Setup_Stuff()
     End If  ' answer = "6"
 
     OptimizeVBA (False)
+    Exit Sub
+ErrHandler:
+    HandleModuleError "Setup_Stuff"
 End Sub
 
 
@@ -1031,14 +1035,15 @@ End Sub
 '   These get rearranged into a sortable 4-char string: DDWW (day,day,week,week).
 '   The Power Query uses a custom order list (CustomOrder) to filter by range.
 '
-' CONTROL CELLS (Data sheet):
-'   U1 = Farm filter: "All" | "Mahela" | other (non-Mahela)
-'   V1 = Valencia toggle: "ON" groups DEL/APV/MKN/GSV as "VAL"
-'   Y1 = Current Week mode: "ON" auto-selects today's pick ref
-'   Z1 = Last selected start pick ref
-'   AA1= Last selected end pick ref (current day)
+' APP SETTINGS (CustomDocumentProperties - see LocalConfig.GetAppSetting):
+'   FarmFilter       = "All" | "Mahela" | other (non-Mahela)
+'   ValenciaGrouping = "ON" groups DEL/APV/MKN/GSV as "VAL"
+'   WeekAutoMode     = "ON" auto-selects today's pick ref
+'   PickRef1         = Last selected start pick ref
+'   PickRef2         = Last selected end pick ref (current day)
 ' =============================================================================
 Public Sub Update_Stuff()
+    On Error GoTo ErrHandler
     InitiateConstants
     curper = 0
 
@@ -1234,13 +1239,13 @@ Public Sub Update_Stuff()
         .Select
         On Error Resume Next
         .ShowAllData   ' Clear any active filters
-        On Error GoTo 0
+        On Error GoTo ErrHandler
         If (.Rows.Count < 100000) Then
             .Rows(2 & ":" & .Rows.Count).Delete
         End If
         On Error Resume Next
         .ShowAllData
-        On Error GoTo 0
+        On Error GoTo ErrHandler
     End With
 
     ' =========================================================================
@@ -1407,6 +1412,9 @@ Public Sub Update_Stuff()
     ThisWorkbook.Worksheets(shName).Select
     UserForm1.Hide
 
+    Exit Sub
+ErrHandler:
+    HandleModuleError "Update_Stuff"
 End Sub
 
 
@@ -1451,6 +1459,7 @@ End Sub
 '   - `ribref = False` means it was called from Update_Stuff (shares the bar)
 ' =============================================================================
 Sub Input_Stuff()
+    On Error GoTo ErrHandler
 
     Dim prog As Double
     Dim ansName As String
@@ -1797,6 +1806,9 @@ Sub Input_Stuff()
     OptimizeVBA (False)
     If ribref Then UserForm1.Hide
 
+    Exit Sub
+ErrHandler:
+    HandleModuleError "Input_Stuff"
 End Sub
 
 
@@ -1846,6 +1858,7 @@ End Sub
 '       Outlook is not set up there. A reminder message is shown instead.
 ' =============================================================================
 Public Sub Export_Stuff()
+    On Error GoTo ErrHandler
     InitiateConstants
 
     Dim answ As String
@@ -1970,6 +1983,9 @@ Public Sub Export_Stuff()
         End If
     End If
 
+    Exit Sub
+ErrHandler:
+    HandleModuleError "Export_Stuff"
 End Sub
 
 
@@ -2070,6 +2086,7 @@ End Sub
 '       because that reflects actual production better for reporting.
 ' =============================================================================
 Sub Short_Stuff()
+    On Error GoTo ErrHandler
 
     shName = "Vordering"
     Dim short As String
@@ -2241,6 +2258,9 @@ Sub Short_Stuff()
     ThisWorkbook.Worksheets(short).Range("A1").Select
     totPerc = 0
 
+    Exit Sub
+ErrHandler:
+    HandleModuleError "Short_Stuff"
 End Sub
 
 
@@ -2273,6 +2293,7 @@ End Sub
 '       label, to maintain the grid position for all items.
 ' =============================================================================
 Sub Chart_Stuff()
+    On Error GoTo ErrHandler
 
     shName = "Vordering"
     Dim sanswer As String
@@ -2429,6 +2450,9 @@ Sub Chart_Stuff()
     If checkLoad = True Then UserForm1.Hide
     totPerc = 0
 
+    Exit Sub
+ErrHandler:
+    HandleModuleError "Chart_Stuff"
 End Sub
 
 
@@ -2449,5 +2473,41 @@ Public Sub OptimizeVBA(isOn As Boolean)
     Application.Calculation = IIf(isOn, xlCalculationManual, xlCalculationAutomatic)
     Application.EnableEvents = Not (isOn)
     Application.ScreenUpdating = Not (isOn)
+End Sub
+
+' =============================================================================
+' HANDLE MODULE ERROR
+' Central error handler for the six main entry points (Setup/Update/Input/
+' Short/Chart/Export_Stuff). Each has "On Error GoTo ErrHandler" at the top
+' and calls this from its ErrHandler: label when something goes wrong.
+'
+' Restores Application state via OptimizeVBA(False) - see that Sub's own
+' comment above for why this matters: without it, a crash mid-operation
+' leaves Excel stuck in manual calculation with no screen updates, which
+' looks like a second, unrelated bug on top of whatever actually failed.
+' Then shows what failed and offers to email a report, so a failure
+' doesn't just silently vanish into "it didn't work, don't know why".
+' =============================================================================
+Public Sub HandleModuleError(procName As String)
+    Dim errNum As Long, errDesc As String
+    errNum = Err.Number
+    errDesc = Err.Description
+
+    OptimizeVBA (False)
+    On Error Resume Next
+    UserForm1.Hide
+    On Error GoTo 0
+
+    Dim msg As String
+    msg = procName & " ran into a problem and stopped:" & vbCrLf & vbCrLf & _
+          "Error " & errNum & ": " & errDesc & vbCrLf & vbCrLf & _
+          "Calculation and screen updating have been restored to normal." & vbCrLf & _
+          "Send a report about this so it can be looked into?"
+
+    If MsgBox(msg, vbYesNo + vbExclamation, "Pakplan Vordering - " & procName & " failed") = vbYes Then
+        Dim context As String
+        context = InputBox("Briefly describe what you were doing when this happened (optional):", "Error Report")
+        SendErrorReport procName, errNum, errDesc, context
+    End If
 End Sub
 
