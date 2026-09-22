@@ -1,0 +1,52 @@
+<customUI xmlns="http://schemas.microsoft.com/office/2009/07/customui" onLoad="RibbonOnLoad">
+  <ribbon>
+    <tabs>
+      <tab id="customTab" label="📊 Pakplan Vordering Tools" insertAfterMso="TabHome">
+        <group id="grpDevTools" label="Developer Tools">
+          <control idMso="VisualBasic" size="large"/>
+          <button id="btnCalcAuto" label="Auto Calculate" onAction="SetCalcAuto" imageMso="CalculateNow" screentip="Auto Calculate" supertip="Switches Excel back to automatic calculation mode. The Main Actions below switch to manual calculation while they run, for speed."/>
+          <control idMso="FormatPainter"/>
+          <control idMso="CellFillColorPicker"/>
+        </group>
+        <group id="grpActions" label="Main Actions">
+          <button id="btnSetup" label="Setup" onAction="Setup_Stuff_R" imageMso="HeaderSourceEdit" size="large" screentip="Setup" supertip="Builds the Vordering progress sheet from scratch using the Pakplan sheet. Run this once per new Pakplan Vordering file."/>
+          <button id="btnUpdate" label="Update Data" onAction="Update_Stuff_R" imageMso="RefreshAll" size="large" screentip="Update Data" supertip="Refreshes pallet intake and dispatch data from the SQL database and recalculates all values in Vordering."/>
+          <button id="btnInput" label="Refresh Values" onAction="Input_Stuff_R" imageMso="AdpDiagramRecalculatePageBreaks" size="large" screentip="Refresh Values" supertip="Rewrites the COUNTIFS formulas in Vordering without pulling new data from SQL. Use this if values look wrong but the data itself hasn't changed."/>
+          <button id="btnSummary" label="Update Summary" onAction="Short_Stuff_R" imageMso="GroupMoveData" size="large" screentip="Update Summary" supertip="Builds or refreshes the Opsomming summary sheet from the current Vordering data."/>
+          <button id="btnCharts" label="Update Charts" onAction="Chart_Stuff_R" imageMso="Chart3DPieChart" size="large" screentip="Update Charts" supertip="Builds or refreshes the pie charts on the Grafieke sheet."/>
+          <button id="btnSend" label="Save/Send" onAction="Export_Stuff_R" imageMso="SendDefault" size="large" screentip="Save/Send" supertip="Saves a clean copy of the workbook and opens an email to send it."/>
+        </group>
+
+        <group id="grpFarmFilter" label="Farm Filter">
+          <labelControl id="lblFarm" label="Select Farm Scope:"/>
+          <dropDown id="ddFarmFilter" getSelectedItemID="GetDefaultFarmFilter" onAction="SetFarmFilter" screentip="Farm Scope" supertip="Choose which farms' pallets to include when Update Data pulls from SQL: Pure Mahela (own farms only), Non Mahela (other farms only), or All Farms.">
+            <item id="Mahela" label="Pure Mahela"/>
+            <item id="NonMahela" label="Non Mahela"/>
+            <item id="All" label="All Farms"/>
+          </dropDown>
+        </group>
+
+        <group id="grpToggle" label="Toggle Options">
+            <toggleButton id="btnValenciaGroup" label="Group Valencias" getPressed="GetValenciaGroupingState" onAction="ToggleValenciaGrouping" imageMso="OutlineGroupMenu" size="large" screentip="Group Valencias" supertip="When on, groups the DEL/APV/MKN/GSV varieties together as VAL. When off, keeps each variety separate."/>
+            <toggleButton id="btnWeekGroup" label="Current Week" getPressed="GetWeekGroupingState" onAction="ToggleWeekGrouping" imageMso="DateAndTimeInsert" size="large" screentip="Current Week" supertip="When on, automatically uses today's Pick Reference. Turn off to manually enter a Pick Reference range in the boxes to the right."/>
+        </group>
+
+        <group id="grpPickRefs" label="Pick References">
+            <editBox id="ebPickRef1" label="Pick Ref 1" onChange="SetPickRef1" getText="GetPickRef1" screentip="Pick Ref 1" supertip="Manual start Pick Reference for the data pull. Only used when Current Week is off."/>
+            <editBox id="ebPickRef2" label="Pick Ref 2" onChange="SetPickRef2" getText="GetPickRef2" screentip="Pick Ref 2" supertip="Manual end Pick Reference for the data pull. Only used when Current Week is off."/>
+            <labelControl id="lblPickRef" label="(Deselect Current Week to use)"/>
+        </group>
+
+        <group id="grpStatus" label="Status">
+            <labelControl id="lblLastUpdated" getLabel="GetLastUpdatedLabel"/>
+            <labelControl id="lblLastSent" getLabel="GetLastSentLabel"/>
+        </group>
+
+        <group id="grpVersion" label="Version">
+          <button id="btnUpdateVersion" label="Check for Updates" onAction="Git_Update_R" imageMso="DatabaseLinedTableManager" size="large" screentip="Check for Updates" supertip="Checks GitHub for a newer version of the main code module and installs it if found."/>
+          <labelControl id="lblVersion" getLabel="GetVersionLabel"/>
+        </group>
+      </tab>
+    </tabs>
+  </ribbon>
+</customUI>

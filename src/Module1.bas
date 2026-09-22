@@ -3,7 +3,12 @@ Option Explicit
 ' =============================================================================
 ' MODULE:  Main Workbook Logic
 ' AUTHOR:  Tiaan (with help from Google, StackOverflow, and GitHub)
-' VERSION: GitHub Version 1.8
+'
+' Human-readable version shown in the ribbon (LocalConfig.GetVersionLabel).
+' Bump this - and tag the matching commit, e.g. `git tag v1.9` - whenever
+' you push an update that Git_Update should pull. Not used for the actual
+' update-needed decision - that compares full file content instead.
+Public Const APP_VERSION As String = "1.9"
 '
 ' PURPOSE:
 '   This module manages the "Pakplan Vordering" (Packing Plan Progress) system.
@@ -1314,15 +1319,17 @@ Public Sub Update_Stuff()
     End If
 
     ' --- Conditional M code: Farm filter ---
-    ' FarmFilter = "Mahela": only own-farm pallets (FARM in OwnFarms list)
-    ' FarmFilter = "All":    all pallets regardless of farm
-    ' Other:                 non-own-farm pallets only
+    ' FarmFilter = "Mahela":    only own-farm pallets (FARM in OwnFarms list)
+    ' FarmFilter = "All":       all pallets regardless of farm
+    ' FarmFilter = "NonMahela": non-own-farm pallets only
     If GetAppSetting("FarmFilter", "All") = "Mahela" Then
         mCode = mCode & "    #""Filtered Own Farms"" = Table.SelectRows(#""Grouped Valencia Varieties"", each List.Contains(OwnFarms, [FARM]))," & vbCrLf & _
             "    #""Merged Dispatch"" = Table.NestedJoin(#""Filtered Own Farms"", {""PALLET_ID""}, Dispatches, {""PALLET_ID""}, ""DispatchLookup"", JoinKind.LeftOuter)," & vbCrLf
     ElseIf GetAppSetting("FarmFilter", "All") = "All" Then
         mCode = mCode & "    #""Merged Dispatch"" = Table.NestedJoin(#""Grouped Valencia Varieties"", {""PALLET_ID""}, Dispatches, {""PALLET_ID""}, ""DispatchLookup"", JoinKind.LeftOuter)," & vbCrLf
     Else
+        ' Covers "NonMahela" plus any unrecognized value as a safe default,
+        ' so an unexpected FarmFilter can't silently produce incomplete M code.
         mCode = mCode & "    #""Filtered Own Farms"" = Table.SelectRows(#""Grouped Valencia Varieties"", each not List.Contains(OwnFarms, [FARM]))," & vbCrLf & _
             "    #""Merged Dispatch"" = Table.NestedJoin(#""Filtered Own Farms"", {""PALLET_ID""}, Dispatches, {""PALLET_ID""}, ""DispatchLookup"", JoinKind.LeftOuter)," & vbCrLf
     End If
