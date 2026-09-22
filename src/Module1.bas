@@ -58,6 +58,10 @@ Dim pickedref1 As String    ' Starting Pick Reference for the data query range
 Dim pickedref2 As String    ' Ending Pick Reference for the data query range
 Dim dTable As ListObject    ' (Reserved) Reference to the DataQuery table object
 Public gRibbon As IRibbonUI ' Ribbon UI reference for refreshing custom controls
+Public gAbortPipeline As Boolean ' Set by HandleModuleError; checked by Update_Stuff
+                                  ' between steps so one failure doesn't cascade into
+                                  ' every later step also erroring and needing its own
+                                  ' dialog acknowledged.
 
 'Oorsig add-on
 'Const OORSIG_NAME  As String = "Oorsig"
@@ -555,6 +559,7 @@ End Sub
 ' =============================================================================
 Public Sub Setup_Stuff()
     On Error GoTo ErrHandler
+    gAbortPipeline = False
     InitiateConstants
 
     ' --- Configure progress bar UserForm ---
@@ -1044,6 +1049,7 @@ End Sub
 ' =============================================================================
 Public Sub Update_Stuff()
     On Error GoTo ErrHandler
+    gAbortPipeline = False
     InitiateConstants
     curper = 0
 
@@ -1092,6 +1098,7 @@ Public Sub Update_Stuff()
     End If
     If Not sheetExists(shName) Then
         Setup_Stuff
+        If gAbortPipeline Then Exit Sub
     End If
 
     Application.ScreenUpdating = True
@@ -1379,6 +1386,7 @@ Public Sub Update_Stuff()
     ' --- Step 5: Write COUNTIFS formulas into Vordering ---
     ribref = False   ' Called from Update, not directly from Ribbon
     Input_Stuff
+    If gAbortPipeline Then Exit Sub
 
     ' --- Finish progress bar ---
     totPerc = 0
@@ -1392,6 +1400,7 @@ Public Sub Update_Stuff()
 
     ' --- Step 6: Rebuild Opsomming summary sheet ---
     Short_Stuff
+    If gAbortPipeline Then Exit Sub
 
     OptimizeVBA (False)
     SetAppSetting "LastUpdated", "Last Updated: " & Now()
@@ -1400,12 +1409,14 @@ Public Sub Update_Stuff()
 
     ' --- Step 7: Rebuild Grafieke charts sheet ---
     Chart_Stuff
+    If gAbortPipeline Then Exit Sub
 
     ThisWorkbook.Worksheets(shName).Visible = xlSheetVisible
     ThisWorkbook.Worksheets(shName).Select
 
     ' --- Step 8: Export and email the report ---
     Export_Stuff
+    If gAbortPipeline Then Exit Sub
 
     OptimizeVBA (False)
     ThisWorkbook.Worksheets(shName).Visible = xlSheetVisible
@@ -1460,6 +1471,7 @@ End Sub
 ' =============================================================================
 Sub Input_Stuff()
     On Error GoTo ErrHandler
+    gAbortPipeline = False
 
     Dim prog As Double
     Dim ansName As String
@@ -1859,6 +1871,7 @@ End Sub
 ' =============================================================================
 Public Sub Export_Stuff()
     On Error GoTo ErrHandler
+    gAbortPipeline = False
     InitiateConstants
 
     Dim answ As String
@@ -2087,6 +2100,7 @@ End Sub
 ' =============================================================================
 Sub Short_Stuff()
     On Error GoTo ErrHandler
+    gAbortPipeline = False
 
     shName = "Vordering"
     Dim short As String
@@ -2294,6 +2308,7 @@ End Sub
 ' =============================================================================
 Sub Chart_Stuff()
     On Error GoTo ErrHandler
+    gAbortPipeline = False
 
     shName = "Vordering"
     Dim sanswer As String
@@ -2493,6 +2508,7 @@ Public Sub HandleModuleError(procName As String)
     errNum = Err.Number
     errDesc = Err.Description
 
+    gAbortPipeline = True
     OptimizeVBA (False)
     On Error Resume Next
     UserForm1.Hide
