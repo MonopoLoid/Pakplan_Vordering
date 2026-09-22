@@ -625,34 +625,34 @@ Public Sub Setup_Stuff()
         ' --- Locate or insert the BATCH NR column in Pakplan ---
         ' The BATCH NR column should be immediately after the STD column.
         ' If it's missing, insert it (needed for Mahela vs non-Mahela logic).
-        Set rngSTDCheck = Sheets(pName).Range("I" & FirstCell.Row & ":Z" & FirstCell.Row).Find("STD", , xlValues, xlWhole)
+        Set rngSTDCheck = ThisWorkbook.Sheets(pName).Range("I" & FirstCell.Row & ":Z" & FirstCell.Row).Find("STD", , xlValues, xlWhole)
         stdcol = rngSTDCheck.Column + 64
         sColstd = charCheck(stdcol + 1)
-        If Not (UCase(Sheets(pName).Range(sColstd & FirstCell.Row).Value) Like "BATC*") Then
-            Sheets(pName).Range(sColstd & ":" & sColstd).EntireColumn.Insert
-            Sheets(pName).Range(sColstd & FirstCell.Row).Value = "BATCH NR"
-            Sheets(pName).Columns(sColstd).ColumnWidth = 6
-            Sheets(pName).Range(sColstd & FirstCell.Row).WrapText = True
+        If Not (UCase(ThisWorkbook.Sheets(pName).Range(sColstd & FirstCell.Row).Value) Like "BATC*") Then
+            ThisWorkbook.Sheets(pName).Range(sColstd & ":" & sColstd).EntireColumn.Insert
+            ThisWorkbook.Sheets(pName).Range(sColstd & FirstCell.Row).Value = "BATCH NR"
+            ThisWorkbook.Sheets(pName).Columns(sColstd).ColumnWidth = 6
+            ThisWorkbook.Sheets(pName).Range(sColstd & FirstCell.Row).WrapText = True
         End If
 
         ' --- Copy header rows from Pakplan to Vordering ---
-        Sheets(pName).Cells(1, "A").EntireRow.Copy Destination:=Sheets(shName).Range("A" & 1).End(xlUp).Offset(startline - 3)
-        Sheets(pName).Range("A2:AZ2").Copy
-        Sheets(shName).Range("A2:AZ2").PasteSpecial xlPasteColumnWidths
-        Sheets(pName).Cells(FirstCell.Row, "A").EntireRow.Copy Destination:=Sheets(shName).Range("A" & 1).End(xlUp).Offset(startline - 1)
+        ThisWorkbook.Sheets(pName).Cells(1, "A").EntireRow.Copy Destination:=ThisWorkbook.Sheets(shName).Range("A" & 1).End(xlUp).Offset(startline - 3)
+        ThisWorkbook.Sheets(pName).Range("A2:AZ2").Copy
+        ThisWorkbook.Sheets(shName).Range("A2:AZ2").PasteSpecial xlPasteColumnWidths
+        ThisWorkbook.Sheets(pName).Cells(FirstCell.Row, "A").EntireRow.Copy Destination:=ThisWorkbook.Sheets(shName).Range("A" & 1).End(xlUp).Offset(startline - 1)
 
         ' --- Find the TOTAL column in Vordering and derive related column references ---
-        Set rngTotalCol = Sheets(shName).Range("Q" & startline & ":AZ" & startline).Find("TOT*", , xlValues, xlWhole)
+        Set rngTotalCol = ThisWorkbook.Sheets(shName).Range("Q" & startline & ":AZ" & startline).Find("TOT*", , xlValues, xlWhole)
         totCol = rngTotalCol.Column + 64
         sColtot = charCheck(totCol)
 
         ' Hide the TOTAL column header text (small white font) to reduce clutter
-        Sheets(shName).Range(sColtot & (startline - 2)).Font.Color = vbWhite
-        Sheets(shName).Range(sColtot & (startline - 2)).Font.Size = 1
+        ThisWorkbook.Sheets(shName).Range(sColtot & (startline - 2)).Font.Color = vbWhite
+        ThisWorkbook.Sheets(shName).Range(sColtot & (startline - 2)).Font.Size = 1
 
         ' Formatting for the data area
-        Sheets(shName).Range("C:" & sColtot).HorizontalAlignment = xlCenter
-        Sheets(shName).Range("Q:" & sColtot).NumberFormat = "0;-0;"  ' Suppress zeros
+        ThisWorkbook.Sheets(shName).Range("C:" & sColtot).HorizontalAlignment = xlCenter
+        ThisWorkbook.Sheets(shName).Range("Q:" & sColtot).NumberFormat = "0;-0;"  ' Suppress zeros
 
         ' COMMENTS column = 1 after TOTAL; second-to-last count column = 1 before TOTAL
         sColcomm = charCheck(totCol + 1)
@@ -671,14 +671,14 @@ Public Sub Setup_Stuff()
             j = (i - (startline - 1)) * block - (k * block) - (block - startline)
 
             ' Only process rows flagged as H (Half pallet) or S (Standard)
-            If (Sheets(pName).Cells(i, "M").Value = "H") Or (Sheets(pName).Cells(i, "M").Value = "S") Then
+            If (ThisWorkbook.Sheets(pName).Cells(i, "M").Value = "H") Or (ThisWorkbook.Sheets(pName).Cells(i, "M").Value = "S") Then
 
                 ' Copy the Pakplan row to Vordering at the calculated offset
-                Sheets(pName).Cells(i, "A").EntireRow.Copy Destination:=Sheets(shName).Range("A" & 1).End(xlUp).Offset(j)
+                ThisWorkbook.Sheets(pName).Cells(i, "A").EntireRow.Copy Destination:=ThisWorkbook.Sheets(shName).Range("A" & 1).End(xlUp).Offset(j)
 
                 ' Draw a top border above this line's block
                 sColterm = charCheck(totCol + 2)
-                With Sheets(shName).Range("A" & 1 & ":" & sColterm & 1).Offset(j).Borders(xlTop)
+                With ThisWorkbook.Sheets(shName).Range("A" & 1 & ":" & sColterm & 1).Offset(j).Borders(xlTop)
                     .LineStyle = xlContinuous
                     .Color = vbBlack
                     .Weight = xlMedium
@@ -694,7 +694,7 @@ Public Sub Setup_Stuff()
                 DoEvents
 
                 ' --- Write sub-row labels in column L ---
-                With Sheets(shName).Cells(i, "L")
+                With ThisWorkbook.Sheets(shName).Cells(i, "L")
                     .Offset(j - i + 2).Value = "Pallets Needed"
                     .Offset(j - i + 3).Value = "Pallets Outstanding"
                     .Offset(j - i + 4).Value = "Pallets in Stock"
@@ -703,48 +703,48 @@ Public Sub Setup_Stuff()
                 End With
 
                 ' Record the actual Vordering row number for later formula building
-                curRow = Sheets(shName).Range("Q" & i).Offset(j - i + 1).Row
+                curRow = ThisWorkbook.Sheets(shName).Range("Q" & i).Offset(j - i + 1).Row
 
                 ' --- Apply formatting to the 5 sub-rows (rows 2-6 of each block) ---
                 For l = 2 To 6
-                    With Sheets(shName).Range("L" & i & ":O" & i).Offset(j - i + l)
+                    With ThisWorkbook.Sheets(shName).Range("L" & i & ":O" & i).Offset(j - i + l)
                         .HorizontalAlignment = xlCenterAcrossSelection
                         .VerticalAlignment = xlCenter
                     End With
-                    With Sheets(shName).Range("A" & i & ":" & sColterm & i).Offset(j - i + l).Borders
+                    With ThisWorkbook.Sheets(shName).Range("A" & i & ":" & sColterm & i).Offset(j - i + l).Borders
                         .LineStyle = xlContinuous
                         .Color = vbBlack
                         .Weight = xlThin
                     End With
                     ' Grey background for all sub-rows
-                    Sheets(shName).Range("A" & i & ":" & sColterm & i).Offset(j - i + l).Interior.Color = RGB(210, 210, 210)
+                    ThisWorkbook.Sheets(shName).Range("A" & i & ":" & sColterm & i).Offset(j - i + l).Interior.Color = RGB(210, 210, 210)
                 Next l
 
                 ' --- Copy TERM/COMMENTS text from Pakplan into Vordering sub-rows ---
                 ' Searches backwards from the current row to find where the
                 ' term text and comment text begin for this packing block.
                 n = i + 1
-                If Not Sheets(pName).Cells(n - 1, 1).Value = "GR* TOT*" Then
+                If Not ThisWorkbook.Sheets(pName).Cells(n - 1, 1).Value = "GR* TOT*" Then
                     Do
                         n = n - 1
-                    Loop Until (Len(Sheets(pName).Cells(n, (totCol - 64 + 2))) > 2) Or _
-                               (Sheets(pName).Cells(n, (totCol - 64 + 1)).Borders(xlEdgeTop).LineStyle <> xlNone)
+                    Loop Until (Len(ThisWorkbook.Sheets(pName).Cells(n, (totCol - 64 + 2))) > 2) Or _
+                               (ThisWorkbook.Sheets(pName).Cells(n, (totCol - 64 + 1)).Borders(xlEdgeTop).LineStyle <> xlNone)
                     ' Count how many term rows exist for this block
                     Dim counter As Integer
                     counter = 0
                     Do
                         counter = counter + 1
-                    Loop Until (Len(Sheets(pName).Cells(n + counter, (totCol - 64 + 2)).Value) > 2) Or _
-                               (Sheets(pName).Cells(n + counter, (totCol - 64 + 1)).Borders(xlEdgeTop).LineStyle <> xlNone) Or _
-                               (Sheets(pName).Cells(n + counter, 1).Value = "GRAND TOTAL") Or _
+                    Loop Until (Len(ThisWorkbook.Sheets(pName).Cells(n + counter, (totCol - 64 + 2)).Value) > 2) Or _
+                               (ThisWorkbook.Sheets(pName).Cells(n + counter, (totCol - 64 + 1)).Borders(xlEdgeTop).LineStyle <> xlNone) Or _
+                               (ThisWorkbook.Sheets(pName).Cells(n + counter, 1).Value = "GRAND TOTAL") Or _
                                (counter > finalRow)
                     counter = counter - 1
                     ' Copy the term text rows
                     For l = 0 To counter
-                        Sheets(shName).Cells(i, (totCol - 64 + 1)).Offset(j - i + l + 1) = Sheets(pName).Cells(n + l, (totCol - 64 + 1))
-                        Sheets(shName).Cells(i, (totCol - 64 + 1)).Offset(j - i + l + 1).Font.Underline = xlUnderlineStyleNone
-                        Sheets(shName).Cells(i, (totCol - 64 + 1)).Offset(j - i + l + 1).Font.Bold = False
-                        Sheets(shName).Cells(i, (totCol - 64 + 1)).Offset(j - i + l + 1).HorizontalAlignment = xlLeft
+                        ThisWorkbook.Sheets(shName).Cells(i, (totCol - 64 + 1)).Offset(j - i + l + 1) = ThisWorkbook.Sheets(pName).Cells(n + l, (totCol - 64 + 1))
+                        ThisWorkbook.Sheets(shName).Cells(i, (totCol - 64 + 1)).Offset(j - i + l + 1).Font.Underline = xlUnderlineStyleNone
+                        ThisWorkbook.Sheets(shName).Cells(i, (totCol - 64 + 1)).Offset(j - i + l + 1).Font.Bold = False
+                        ThisWorkbook.Sheets(shName).Cells(i, (totCol - 64 + 1)).Offset(j - i + l + 1).HorizontalAlignment = xlLeft
                     Next l
                 End If
 
@@ -755,17 +755,17 @@ Public Sub Setup_Stuff()
                 ' Row 5 = Pallets Overpacked: IF "As Ordered" in comments -> special formula
                 ' Row 6 = Pallets Dispatched: same as others
                 For l = 2 To 6
-                    curRow = Sheets(shName).Range("P" & i).Offset(j - i + l).Row
-                    Sheets(shName).Range("P" & i).Offset(j - i + l).FormatConditions.Delete
+                    curRow = ThisWorkbook.Sheets(shName).Range("P" & i).Offset(j - i + l).Row
+                    ThisWorkbook.Sheets(shName).Range("P" & i).Offset(j - i + l).FormatConditions.Delete
 
                     If l <> 5 Then
                         ' Standard: sum all size columns for this row
-                        Sheets(shName).Range("P" & i).Offset(j - i + l).Formula = _
+                        ThisWorkbook.Sheets(shName).Range("P" & i).Offset(j - i + l).Formula = _
                             "=SUM(Q" & curRow & ":" & sColfinnum & curRow & ")"
                     Else
                         ' Pallets Overpacked: check if "AS ORDERED" appears in comments
                         ' If so, sum directly; otherwise derive from "Pallets Needed - Pallets Dispatched"
-                        Sheets(shName).Range("P" & i).Offset(j - i + l).Formula = _
+                        ThisWorkbook.Sheets(shName).Range("P" & i).Offset(j - i + l).Formula = _
                             "=IF(COUNTIF(" & sColcomm & (curRow - 4) & ":" & sColcomm & (curRow + 1) & "," & Chr(34) & "*AS ORDERED*" & Chr(34) & ")>0," & _
                             "SUM(Q" & curRow & ":" & sColfinnum & curRow & ")," & _
                             "IF(P" & (curRow - 2) & ">0,0,(-1)*P" & (curRow - 2) & "))"
@@ -773,12 +773,12 @@ Public Sub Setup_Stuff()
 
                     ' Conditional formatting on Outstanding (l=3) and Overpacked (l=5)
                     If l = 3 Or l = 5 Then
-                        CondFormAddRule Range("P" & i).Offset(j - i + l), 3, RGB(70, 170, 100)   ' = 0: green
-                        CondFormAddRule Range("P" & i).Offset(j - i + l), 6, RGB(230, 80, 80)    ' < 0: red
+                        CondFormAddRule ThisWorkbook.Sheets(shName).Range("P" & i).Offset(j - i + l), 3, RGB(70, 170, 100)   ' = 0: green
+                        CondFormAddRule ThisWorkbook.Sheets(shName).Range("P" & i).Offset(j - i + l), 6, RGB(230, 80, 80)    ' < 0: red
                         If l = 5 Then
-                            CondFormAddRule Range("P" & i).Offset(j - i + l), 5, RGB(230, 80, 80) ' > 0: red (overpack)
+                            CondFormAddRule ThisWorkbook.Sheets(shName).Range("P" & i).Offset(j - i + l), 5, RGB(230, 80, 80) ' > 0: red (overpack)
                         Else
-                            CondFormAddRule Range("P" & i).Offset(j - i + l), 5, vbYellow         ' > 0: yellow (still outstanding)
+                            CondFormAddRule ThisWorkbook.Sheets(shName).Range("P" & i).Offset(j - i + l), 5, vbYellow         ' > 0: yellow (still outstanding)
                         End If
                     End If
                 Next l
@@ -788,24 +788,24 @@ Public Sub Setup_Stuff()
                 '   1. Calculate from N+O columns (pallet dimensions)
                 '   2. Hardcoded for specific pack types (Z10D, A06D)
                 '   3. Lookup table by carton code, split by H (high) vs S (standard)
-                curRow = Sheets(shName).Range("Q" & i).Offset(j - i + 2).Row
+                curRow = ThisWorkbook.Sheets(shName).Range("Q" & i).Offset(j - i + 2).Row
 
-                If ((Sheets(shName).Cells(curRow - 1, "N").Value + Sheets(shName).Cells(curRow - 1, "O").Value) > 0) And _
-                   (InStr(1, Sheets(shName).Cells(curRow - 1, "N").Value, "*") = 0) And _
-                   (InStr(1, Sheets(shName).Cells(curRow - 1, "O").Value, "*") = 0) Then
+                If ((ThisWorkbook.Sheets(shName).Cells(curRow - 1, "N").Value + ThisWorkbook.Sheets(shName).Cells(curRow - 1, "O").Value) > 0) And _
+                   (InStr(1, ThisWorkbook.Sheets(shName).Cells(curRow - 1, "N").Value, "*") = 0) And _
+                   (InStr(1, ThisWorkbook.Sheets(shName).Cells(curRow - 1, "O").Value, "*") = 0) Then
                     ' Use pallet dimension data if available and not asterisked
-                    cartonCount = (Sheets(shName).Cells(curRow - 1, sColtot).Value) / _
-                                  (Sheets(shName).Cells(curRow - 1, "N").Value + Sheets(shName).Cells(curRow - 1, "O").Value)
+                    cartonCount = (ThisWorkbook.Sheets(shName).Cells(curRow - 1, sColtot).Value) / _
+                                  (ThisWorkbook.Sheets(shName).Cells(curRow - 1, "N").Value + ThisWorkbook.Sheets(shName).Cells(curRow - 1, "O").Value)
                 Else
-                    If Sheets(shName).Cells(curRow - 1, "H").Value = "Z10D" Or _
-                       Sheets(shName).Cells(curRow - 1, "H").Value = "A06D" Then
+                    If ThisWorkbook.Sheets(shName).Cells(curRow - 1, "H").Value = "Z10D" Or _
+                       ThisWorkbook.Sheets(shName).Cells(curRow - 1, "H").Value = "A06D" Then
                         ' Special carton types always get 95
                         cartonCount = 95
                     Else
                         ' Look up by carton code. "H" = High pallet, other = standard pallet.
-                        If Sheets(shName).Cells(curRow - 1, "M").Value = "H" Then
+                        If ThisWorkbook.Sheets(shName).Cells(curRow - 1, "M").Value = "H" Then
                             ' High pallet carton counts
-                            Select Case Sheets(shName).Cells(curRow - 1, "H").Value
+                            Select Case ThisWorkbook.Sheets(shName).Cells(curRow - 1, "H").Value
                                 Case "A15C":         cartonCount = 80
                                 Case "E10D", "E10D/D10D": cartonCount = 104
                                 Case "D10D":         cartonCount = 112
@@ -816,7 +816,7 @@ Public Sub Setup_Stuff()
                             End Select
                         Else
                             ' Standard pallet carton counts
-                            Select Case Sheets(shName).Cells(curRow - 1, "H").Value
+                            Select Case ThisWorkbook.Sheets(shName).Cells(curRow - 1, "H").Value
                                 Case "A15C":         cartonCount = 70
                                 Case "E10D", "E10D/D10D": cartonCount = 88
                                 Case "D10D":         cartonCount = 96
@@ -832,48 +832,48 @@ Public Sub Setup_Stuff()
                 ' --- Collect all comment text for this block (for IsCountAsOrdered check) ---
                 commentCheck = ""
                 For h = 1 To 6
-                    commentCheck = commentCheck + Sheets(shName).Range(sColcomm & i).Offset(j - i + h).Formula
+                    commentCheck = commentCheck + ThisWorkbook.Sheets(shName).Range(sColcomm & i).Offset(j - i + h).Formula
                 Next h
 
                 ' --- Write per-size formulas for each size column ---
                 ' Iterates from the first size column (curCol) to the last (totCol-1).
-                curCol = Sheets(shName).Range("Q" & i).Offset(j - i + 2).Column + 64
+                curCol = ThisWorkbook.Sheets(shName).Range("Q" & i).Offset(j - i + 2).Column + 64
 
                 For m = curCol To (totCol - 1)
                     colvar = charCheck(m)
-                    curRow = Sheets(shName).Range("Q" & i).Offset(j - i + 2).Row
+                    curRow = ThisWorkbook.Sheets(shName).Range("Q" & i).Offset(j - i + 2).Row
 
                     ' Store cartons-per-pallet in the TERM column of the Dispatched row
-                    Sheets(shName).Range(sColterm & i).Offset(j - i + 6).Formula = cartonCount
+                    ThisWorkbook.Sheets(shName).Range(sColterm & i).Offset(j - i + 6).Formula = cartonCount
 
                     ' Row 2 = Pallets Needed:
                     '   If the Pakplan cell has an asterisk (*), this is a "split size"
                     '   line - add Stock + Dispatched from other rows instead.
-                    If InStr(1, Sheets(shName).Range(colvar & i).Offset(j - i + 1).Value, "*") + InStr(1, Sheets(shName).Range(colvar & i).Offset(j - i + 1).Value, "L") + InStr(1, Sheets(shName).Range(colvar & i).Offset(j - i + 1).Value, "M") + InStr(1, Sheets(shName).Range(colvar & i).Offset(j - i + 1).Value, "S") <> 0 Then
+                    If InStr(1, ThisWorkbook.Sheets(shName).Range(colvar & i).Offset(j - i + 1).Value, "*") + InStr(1, ThisWorkbook.Sheets(shName).Range(colvar & i).Offset(j - i + 1).Value, "L") + InStr(1, ThisWorkbook.Sheets(shName).Range(colvar & i).Offset(j - i + 1).Value, "M") + InStr(1, ThisWorkbook.Sheets(shName).Range(colvar & i).Offset(j - i + 1).Value, "S") <> 0 Then
                         ' Asterisk = use stock+dispatched sum instead (5.4.11.1 fix)
-                        Sheets(shName).Range(colvar & i).Offset(j - i + 2).Formula = _
+                        ThisWorkbook.Sheets(shName).Range(colvar & i).Offset(j - i + 2).Formula = _
                             "=IFERROR(" & colvar & (curRow + 2) & "+" & colvar & (curRow + 4) & ",0)"
                     Else
-                        Sheets(shName).Range(colvar & i).Offset(j - i + 2).Formula = _
+                        ThisWorkbook.Sheets(shName).Range(colvar & i).Offset(j - i + 2).Formula = _
                             "=IFERROR(" & colvar & (curRow - 1) & "/" & cartonCount & ",0)"
                     End If
 
                     ' Row 3 = Pallets Outstanding: Needed - (Stock + Dispatched)
                     curRow = curRow + 1
-                    Sheets(shName).Range(colvar & i).Offset(j - i + 3).Formula = _
+                    ThisWorkbook.Sheets(shName).Range(colvar & i).Offset(j - i + 3).Formula = _
                         "=IFERROR(" & colvar & (curRow - 1) & "-(" & colvar & (curRow + 1) & "+" & colvar & (curRow + 3) & "),0)"
 
                     ' Row 5 = Pallets Overpacked: formula differs by "As Ordered" logic
                     curRow = curRow + 2
-                    If IsCountAsOrdered(Sheets(shName).Range(colvar & startline).Formula, commentCheck) Then
+                    If IsCountAsOrdered(ThisWorkbook.Sheets(shName).Range(colvar & startline).Formula, commentCheck) Then
                         ' "As Ordered": overpack = how much above the ordered count was packed/dispatched
-                        Sheets(shName).Range(colvar & i).Offset(j - i + 5).Formula = _
+                        ThisWorkbook.Sheets(shName).Range(colvar & i).Offset(j - i + 5).Formula = _
                             "=IF(" & colvar & (curRow - 2) & "<0,-" & colvar & (curRow - 2) & "," & _
                             "IF((" & colvar & (curRow - 1) & "+" & colvar & (curRow + 1) & ")-" & colvar & (curRow - 3) & ">0," & _
                             "(" & colvar & (curRow - 1) & "+" & colvar & (curRow + 1) & ")-" & colvar & (curRow - 3) & ",0))"
                     Else
                         ' Standard: overpack only if total pack+dispatch > total needed
-                        Sheets(shName).Range(colvar & i).Offset(j - i + 5).Formula = _
+                        ThisWorkbook.Sheets(shName).Range(colvar & i).Offset(j - i + 5).Formula = _
                             "=IF(($P" & (curRow - 1) & "+$P" & (curRow + 1) & ")>$P" & (curRow - 3) & "," & _
                             "IF((" & colvar & (curRow - 1) & "+" & colvar & (curRow + 1) & ")-" & colvar & (curRow - 3) & ">0," & _
                             "(" & colvar & (curRow - 1) & "+" & colvar & (curRow + 1) & ")-" & colvar & (curRow - 3) & ",0),0)"
@@ -881,17 +881,17 @@ Public Sub Setup_Stuff()
                 Next m
 
                 ' --- Add SUMIFS formulas for specific summary columns if this is a GRAND TOTAL block ---
-                If Sheets(shName).Range("A" & curRow - 1).Value = "GR* TOT*" Then
+                If ThisWorkbook.Sheets(shName).Range("A" & curRow - 1).Value = "GR* TOT*" Then
                     sCol2 = charCheck(curCol - 2)
                     sCol3 = charCheck(curCol - 3)
                     sCol1 = charCheck(curCol - 1)
-                    Sheets(shName).Range(sCol2 & i).Offset(j - i + 1).Formula = _
+                    ThisWorkbook.Sheets(shName).Range(sCol2 & i).Offset(j - i + 1).Formula = _
                         "=SUMIFS(" & sCol2 & "$1:" & sCol2 & "$" & (curRow - 2) & ",$" & sColtot & "$1:$" & sColtot & "$" & (curRow - 2) & "," & Chr(34) & ">0" & Chr(34) & ")"
-                    Sheets(shName).Range(sCol3 & i).Offset(j - i + 1).Formula = _
+                    ThisWorkbook.Sheets(shName).Range(sCol3 & i).Offset(j - i + 1).Formula = _
                         "=SUMIFS(" & sCol3 & "$1:" & sCol3 & "$" & (curRow - 2) & ",$" & sColtot & "$1:$" & sColtot & "$" & (curRow - 2) & "," & Chr(34) & ">0" & Chr(34) & ")"
-                    Sheets(shName).Range(sColtot & i).Offset(j - i + 1).Formula = _
+                    ThisWorkbook.Sheets(shName).Range(sColtot & i).Offset(j - i + 1).Formula = _
                         "=SUMIFS(" & sColtot & "$1:" & sColtot & "$" & (curRow - 2) & ",$" & sColtot & "$1:$" & sColtot & "$" & (curRow - 2) & "," & Chr(34) & ">0" & Chr(34) & ")"
-                    Sheets(shName).Range(sCol1 & i).Offset(j - i + 5).Formula = _
+                    ThisWorkbook.Sheets(shName).Range(sCol1 & i).Offset(j - i + 5).Formula = _
                         "=SUMIFS(" & sCol1 & "$1:" & sCol1 & "$" & (curRow - 2) & ",$L$1:$L$" & (curRow - 2) & ",$L" & (curRow + 3) & ")"
                 End If
 
@@ -912,41 +912,41 @@ Public Sub Setup_Stuff()
 
         ' Format the 6 sub-rows of the Grand Total block
         For l = 1 To 6
-            With Sheets(shName).Range("L" & i & ":O" & i).Offset(j - i + l)
+            With ThisWorkbook.Sheets(shName).Range("L" & i & ":O" & i).Offset(j - i + l)
                 .HorizontalAlignment = xlCenterAcrossSelection
                 .VerticalAlignment = xlCenter
             End With
-            With Sheets(shName).Range("A" & i & ":" & sColterm & i).Offset(j - i + l).Borders
+            With ThisWorkbook.Sheets(shName).Range("A" & i & ":" & sColterm & i).Offset(j - i + l).Borders
                 .LineStyle = xlContinuous
                 .Color = vbBlack
                 .Weight = xlThin
             End With
-            Sheets(shName).Range("A" & i & ":" & sColterm & i).Offset(j - i + l).Font.Bold = True
-            Sheets(shName).Range("A" & i & ":" & sColterm & i).Offset(j - i + l).Interior.Color = RGB(165, 175, 200)
+            ThisWorkbook.Sheets(shName).Range("A" & i & ":" & sColterm & i).Offset(j - i + l).Font.Bold = True
+            ThisWorkbook.Sheets(shName).Range("A" & i & ":" & sColterm & i).Offset(j - i + l).Interior.Color = RGB(165, 175, 200)
         Next l
 
         ' Write per-size SUMIFS formulas for the Grand Total sub-rows
         For m = curCol To (totCol - 1)
             colvar = charCheck(m)
-            curRow = Sheets(shName).Range("Q" & i).Offset(j - i + 2).Row
+            curRow = ThisWorkbook.Sheets(shName).Range("Q" & i).Offset(j - i + 2).Row
             For l = 2 To 6
-                Sheets(shName).Range(colvar & i).Offset(j - i + l).Formula = _
+                ThisWorkbook.Sheets(shName).Range(colvar & i).Offset(j - i + l).Formula = _
                     "=SUMIFS(" & colvar & "$1:" & colvar & "$" & (curRow - 2) & ",$L$1:$L$" & (curRow - 2) & ",$L" & (curRow - 1) & ")"
             Next l
-            Sheets(shName).Range(colvar & i).Offset(j - i + 1).Formula = _
+            ThisWorkbook.Sheets(shName).Range(colvar & i).Offset(j - i + 1).Formula = _
                 "=SUMIFS(" & colvar & "$1:" & colvar & "$" & (curRow - 2) & ",$" & sColtot & "$1:$" & sColtot & "$" & (curRow - 2) & "," & Chr(34) & ">0" & Chr(34) & ")"
         Next m
 
         ' Grand Total header label and top border
-        Sheets(shName).Range("A" & i).Offset(j - i + 1).Value = "GRAND TOTAL"
-        With Sheets(shName).Range("A" & i & ":" & sColterm & i).Offset(j - i + 1).Borders(xlEdgeTop)
+        ThisWorkbook.Sheets(shName).Range("A" & i).Offset(j - i + 1).Value = "GRAND TOTAL"
+        With ThisWorkbook.Sheets(shName).Range("A" & i & ":" & sColterm & i).Offset(j - i + 1).Borders(xlEdgeTop)
             .LineStyle = xlContinuous
             .Color = vbBlack
             .Weight = xlMedium
         End With
 
         ' Row labels for Grand Total sub-rows
-        With Sheets(shName).Cells(i, "L")
+        With ThisWorkbook.Sheets(shName).Cells(i, "L")
             .Offset(j - i + 2).Value = "Pallets Needed"
             .Offset(j - i + 3).Value = "Pallets Outstanding"
             .Offset(j - i + 4).Value = "Pallets in Stock"
@@ -958,10 +958,10 @@ Public Sub Setup_Stuff()
         For m = curCol To (totCol - 1)
             colvar = charCheck(m)
             For l = 2 To 6
-                Sheets(shName).Range(colvar & i).Offset(j - i + l).Formula = _
+                ThisWorkbook.Sheets(shName).Range(colvar & i).Offset(j - i + l).Formula = _
                     "=SUMIFS(" & colvar & "$1:" & colvar & "$" & (curRow - 2) & ",$L$1:$L$" & (curRow - 2) & ",$L" & (curRow + l - 2) & ")"
             Next l
-            Sheets(shName).Range(colvar & i).Offset(j - i + 1).Formula = _
+            ThisWorkbook.Sheets(shName).Range(colvar & i).Offset(j - i + 1).Formula = _
                 "=SUMIFS(" & colvar & "$1:" & colvar & "$" & (curRow - 2) & ",$" & sColtot & "$1:$" & sColtot & "$" & (curRow - 2) & "," & Chr(34) & ">0" & Chr(34) & ")"
         Next m
 
@@ -969,28 +969,28 @@ Public Sub Setup_Stuff()
         sCol2 = charCheck(curCol - 2)
         sCol3 = charCheck(curCol - 3)
         sCol1 = charCheck(curCol - 1)
-        Sheets(shName).Range(sCol2 & i).Offset(j - i + 1).Formula = _
+        ThisWorkbook.Sheets(shName).Range(sCol2 & i).Offset(j - i + 1).Formula = _
             "=SUMIFS(" & sCol2 & "$1:" & sCol2 & "$" & (curRow - 2) & ",$" & sColtot & "$1:$" & sColtot & "$" & (curRow - 2) & "," & Chr(34) & ">0" & Chr(34) & ")"
-        Sheets(shName).Range(sCol3 & i).Offset(j - i + 1).Formula = _
+        ThisWorkbook.Sheets(shName).Range(sCol3 & i).Offset(j - i + 1).Formula = _
             "=SUMIFS(" & sCol3 & "$1:" & sCol3 & "$" & (curRow - 2) & ",$" & sColtot & "$1:$" & sColtot & "$" & (curRow - 2) & "," & Chr(34) & ">0" & Chr(34) & ")"
-        Sheets(shName).Range(sColtot & i).Offset(j - i + 1).Formula = _
+        ThisWorkbook.Sheets(shName).Range(sColtot & i).Offset(j - i + 1).Formula = _
             "=SUMIFS(" & sColtot & "$1:" & sColtot & "$" & (curRow - 2) & ",$" & sColtot & "$1:$" & sColtot & "$" & (curRow - 2) & "," & Chr(34) & ">0" & Chr(34) & ")"
-        Sheets(shName).Range(sCol1 & i).Offset(j - i + 5).Formula = _
+        ThisWorkbook.Sheets(shName).Range(sCol1 & i).Offset(j - i + 5).Formula = _
             "=SUMIFS(" & sCol1 & "$1:" & sCol1 & "$" & (curRow - 2) & ",$L$1:$L$" & (curRow - 2) & ",$L" & (curRow + 3) & ",$P$1:$P$" & (curRow - 2) & "," & Chr(34) & ">0" & Chr(34) & ")"
 
         ' Column P totals for Grand Total (sub-rows 2-6, skipping row 5 which is handled above)
         For l = 2 To 6
             If l <> 5 Then
-                Sheets(shName).Range(sCol1 & i).Offset(j - i + l).Formula = _
+                ThisWorkbook.Sheets(shName).Range(sCol1 & i).Offset(j - i + l).Formula = _
                     "=SUM(Q" & (curRow + l - 2) & ":" & sColfinnum & (curRow + l - 2) & ")"
             End If
         Next l
 
         ' --- Final formatting ---
-        Sheets(shName).Rows("1:" & j).EntireRow.Hidden = False
-        Sheets(shName).Range("P:P").NumberFormat = "General"
-        Sheets(shName).Range("A1").Select
-        Sheets(shName).Visible = xlSheetVisible
+        ThisWorkbook.Sheets(shName).Rows("1:" & j).EntireRow.Hidden = False
+        ThisWorkbook.Sheets(shName).Range("P:P").NumberFormat = "General"
+        ThisWorkbook.Sheets(shName).Range("A1").Select
+        ThisWorkbook.Sheets(shName).Visible = xlSheetVisible
         Application.ScreenUpdating = True
         UserForm1.Hide
 
@@ -1464,7 +1464,7 @@ Sub Input_Stuff()
     Dim i As Integer, j As Integer, k As Integer
     Dim vals As Integer, vorRows As Integer, totCol As Integer
     vals = 0
-    totCol = Sheets(shName).Range("Q" & startline & ":AZ" & startline).Find("TOTAL", , xlValues, xlWhole).Column
+    totCol = ThisWorkbook.Sheets(shName).Range("Q" & startline & ":AZ" & startline).Find("TOTAL", , xlValues, xlWhole).Column
     vorRows = ThisWorkbook.Worksheets(shName).Columns(totCol).Find("*", SearchOrder:=xlByRows, SearchDirection:=xlPrevious).Row + 5
 
     ' --- Pre-style: colour the Dispatched and In Stock row backgrounds ---
@@ -2081,8 +2081,8 @@ Sub Short_Stuff()
     checkLoad = False
     short = "Opsomming"
     sanswer = "6"
-    totCol = Sheets(shName).Range("Q" & startline & ":AZ" & startline).Find("TOTAL", , xlValues, xlWhole).Column + 64
-    iRows = (Sheets(shName).Range("A" & startline & ":A" & 1000).Find("GRAND TOTA*", , xlValues, xlWhole).Row + 5) * 3
+    totCol = ThisWorkbook.Sheets(shName).Range("Q" & startline & ":AZ" & startline).Find("TOTAL", , xlValues, xlWhole).Column + 64
+    iRows = (ThisWorkbook.Sheets(shName).Range("A" & startline & ":A" & 1000).Find("GRAND TOTA*", , xlValues, xlWhole).Row + 5) * 3
 
     ' Create the sheet if needed, otherwise just select it
     If Not sheetExists(short) Then
@@ -2116,22 +2116,22 @@ Sub Short_Stuff()
         OptimizeVBA (True)
 
         ' Copy the header row from Vordering to Opsomming row 1
-        Sheets(shName).Range("A" & startline & ":" & charCheck(totCol) & startline).Copy _
-            Destination:=Sheets(short).Range("A" & 1).End(xlUp)
+        ThisWorkbook.Sheets(shName).Range("A" & startline & ":" & charCheck(totCol) & startline).Copy _
+            Destination:=ThisWorkbook.Sheets(short).Range("A" & 1).End(xlUp)
         ' Copy column widths to match
-        Sheets(shName).Range("A" & startline & ":" & charCheck(totCol) & startline).Copy
-        Sheets(short).Range("A" & startline & ":" & charCheck(totCol) & startline).PasteSpecial xlPasteColumnWidths
+        ThisWorkbook.Sheets(shName).Range("A" & startline & ":" & charCheck(totCol) & startline).Copy
+        ThisWorkbook.Sheets(short).Range("A" & startline & ":" & charCheck(totCol) & startline).PasteSpecial xlPasteColumnWidths
 
         ' Style the header row with borders
-        With Sheets(short).Range("A" & 1 & ":" & charCheck(totCol) & 1).Borders()
+        With ThisWorkbook.Sheets(short).Range("A" & 1 & ":" & charCheck(totCol) & 1).Borders()
             .LineStyle = xlContinuous
             .Color = vbBlack
             .Weight = xlMedium
         End With
 
         ' Add a "STILL NEED" column header in the last column
-        Sheets(short).Range(charCheck(totCol) & "1").Value = "STILL NEED"
-        Sheets(short).Range(charCheck(totCol) & "1").WrapText = True
+        ThisWorkbook.Sheets(short).Range(charCheck(totCol) & "1").Value = "STILL NEED"
+        ThisWorkbook.Sheets(short).Range(charCheck(totCol) & "1").WrapText = True
 
         ' Find the last row of data in Vordering
         Dim FinCell As Range, finRow As Integer
@@ -2160,71 +2160,71 @@ Sub Short_Stuff()
             End If
 
             ' Only process "Pallets Outstanding" rows
-            If Sheets(shName).Range("L" & i).Value = "Pallets Outstanding" Then
+            If ThisWorkbook.Sheets(shName).Range("L" & i).Value = "Pallets Outstanding" Then
                 k = k + 1
 
                 ' Copy all columns for this row
                 For j = 65 To (totCol - 1)
                     If j < 81 Then
                         ' Columns A-P (ASCII 65-80): copy directly from the data row (i-2)
-                        Sheets(short).Range(charCheck(j) & k).Value = Sheets(shName).Range(charCheck(j) & (i - 2)).Value
+                        ThisWorkbook.Sheets(short).Range(charCheck(j) & k).Value = ThisWorkbook.Sheets(shName).Range(charCheck(j) & (i - 2)).Value
                     Else
                         ' Size columns (Q onwards): show Stock + Dispatched (packed so far)
-                        If Sheets(shName).Range(charCheck(j) & (i + 1)).Value + Sheets(shName).Range(charCheck(j) & (i + 3)).Value > 0 Then
-                            Sheets(short).Range(charCheck(j) & k).Value = _
-                                Sheets(shName).Range(charCheck(j) & (i + 1)).Value + _
-                                Sheets(shName).Range(charCheck(j) & (i + 3)).Value
+                        If ThisWorkbook.Sheets(shName).Range(charCheck(j) & (i + 1)).Value + ThisWorkbook.Sheets(shName).Range(charCheck(j) & (i + 3)).Value > 0 Then
+                            ThisWorkbook.Sheets(short).Range(charCheck(j) & k).Value = _
+                                ThisWorkbook.Sheets(shName).Range(charCheck(j) & (i + 1)).Value + _
+                                ThisWorkbook.Sheets(shName).Range(charCheck(j) & (i + 3)).Value
                         Else
-                            Sheets(short).Range(charCheck(j) & k).Formula = ""
+                            ThisWorkbook.Sheets(short).Range(charCheck(j) & k).Formula = ""
                         End If
                     End If
                 Next j
 
                 ' Apply borders to this summary row
-                With Sheets(short).Range("A" & k & ":" & charCheck(totCol) & k).Borders()
+                With ThisWorkbook.Sheets(short).Range("A" & k & ":" & charCheck(totCol) & k).Borders()
                     .LineStyle = xlContinuous
                     .Color = vbBlack
                     .Weight = xlThin
                 End With
                 ' Medium border on the right of col P (separates info from size columns)
-                With Sheets(short).Range("P" & k & ":P" & k).Borders(xlRight)
+                With ThisWorkbook.Sheets(short).Range("P" & k & ":P" & k).Borders(xlRight)
                     .LineStyle = xlContinuous
                     .Color = vbBlack
                     .Weight = xlMedium
                 End With
                 ' Medium borders around the STILL NEED column
-                With Sheets(short).Range(charCheck(totCol) & k).Borders(xlLeft)
+                With ThisWorkbook.Sheets(short).Range(charCheck(totCol) & k).Borders(xlLeft)
                     .LineStyle = xlContinuous
                     .Color = vbBlack
                     .Weight = xlMedium
                 End With
-                With Sheets(short).Range(charCheck(totCol) & k).Borders(xlRight)
+                With ThisWorkbook.Sheets(short).Range(charCheck(totCol) & k).Borders(xlRight)
                     .LineStyle = xlContinuous
                     .Color = vbBlack
                     .Weight = xlMedium
                 End With
 
                 ' Write Outstanding value in the STILL NEED column
-                Sheets(short).Range(charCheck(totCol) & k).Value = Sheets(shName).Range("P" & i).Value
+                ThisWorkbook.Sheets(short).Range(charCheck(totCol) & k).Value = ThisWorkbook.Sheets(shName).Range("P" & i).Value
 
                 ' Highlight green if nothing is outstanding
-                If Sheets(short).Range(charCheck(totCol) & k).Value = 0 Then
-                    Sheets(short).Range(charCheck(totCol) & k).Interior.Color = RGB(70, 170, 100)
+                If ThisWorkbook.Sheets(short).Range(charCheck(totCol) & k).Value = 0 Then
+                    ThisWorkbook.Sheets(short).Range(charCheck(totCol) & k).Interior.Color = RGB(70, 170, 100)
                 End If
 
             End If
         Next i
 
         ' Centre-align all size columns in Opsomming
-        Sheets(short).Range("Q1:" & charCheck(totCol) & k).HorizontalAlignment = xlCenter
+        ThisWorkbook.Sheets(short).Range("Q1:" & charCheck(totCol) & k).HorizontalAlignment = xlCenter
 
         ' Medium top border on the last data row and the row after (visual separator)
-        With Sheets(short).Range("A" & k & ":" & charCheck(totCol) & k).Borders(xlTop)
+        With ThisWorkbook.Sheets(short).Range("A" & k & ":" & charCheck(totCol) & k).Borders(xlTop)
             .LineStyle = xlContinuous
             .Color = vbBlack
             .Weight = xlMedium
         End With
-        With Sheets(short).Range("A" & k + 1 & ":" & charCheck(totCol) & k + 1).Borders(xlTop)
+        With ThisWorkbook.Sheets(short).Range("A" & k + 1 & ":" & charCheck(totCol) & k + 1).Borders(xlTop)
             .LineStyle = xlContinuous
             .Color = vbBlack
             .Weight = xlMedium
@@ -2237,7 +2237,7 @@ Sub Short_Stuff()
     If checkLoad = True Then UserForm1.Hide
 
     ' Clear clipboard and return to top of sheet
-    Sheets(short).Range("AZ1").Copy
+    ThisWorkbook.Sheets(short).Range("AZ1").Copy
     ThisWorkbook.Worksheets(short).Range("A1").Select
     totPerc = 0
 
@@ -2296,10 +2296,10 @@ Sub Chart_Stuff()
     checkLoad = False
 
     ' Locate the BATCH NR column in Vordering (the reference column for reading row offsets)
-    batCol = Sheets(shName).Range("A" & startline & ":AZ" & startline).Find("BATC*", , xlValues, xlWhole).Column + 64
+    batCol = ThisWorkbook.Sheets(shName).Range("A" & startline & ":AZ" & startline).Find("BATC*", , xlValues, xlWhole).Column + 64
 
     ' Count the number of packing lines (items) = rows between startline and GRAND TOTAL, divided by block size (6)
-    iItems = (Sheets(shName).Range("A" & startline & ":A" & 1000).Find("GRAND TOTA*", , xlValues, xlWhole).Row - startline - 1) / 6
+    iItems = (ThisWorkbook.Sheets(shName).Range("A" & startline & ":A" & 1000).Find("GRAND TOTA*", , xlValues, xlWhole).Row - startline - 1) / 6
 
     sChart = "Grafieke"
     OptimizeVBA (True)
