@@ -3,3 +3,7 @@
 .~lock*
 Thumbs.db
 desktop.ini
+
+# Contains real email addresses, server names, and computer names.
+# This repo is public - never track this file here.
+src/LocalConfig.bas
