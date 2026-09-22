@@ -77,7 +77,7 @@ Public Sub EnsureDataSheetDefaults()
 
     ' Create the Data sheet if it doesn't exist yet
     If Not sheetExists("Data") Then
-        ThisWorkbook.Sheets.Add.Name = "Data"
+        ThisWorkbook.Sheets.Add.name = "Data"
         ThisWorkbook.Worksheets("Data").Visible = xlSheetVisible
         ' NOTE: The table creation block below is commented out.
         ' If you need to re-enable it, uncomment and make sure
@@ -88,33 +88,33 @@ Public Sub EnsureDataSheetDefaults()
         'End If
     End If
 
-    ' Initialise ribbon/filter control cells on the Data sheet (if blank):
-    '   U1 = Farm filter ("All" / "Mahela" / "Other") - used in Power Query M code
-    '   V1 = Valencia grouping toggle ("ON" groups DEL/APV/MKN/GSV as "VAL"; "OFF" keeps separate)
-    '   Y1 = "Current Week" auto-mode ("ON" = use today's pick ref; "OFF" = user must enter)
-    If ThisWorkbook.Sheets("Data").Range("U1").Value = "" Then ThisWorkbook.Sheets("Data").Range("U1").Value = "All"
-    If ThisWorkbook.Sheets("Data").Range("V1").Value = "" Then ThisWorkbook.Sheets("Data").Range("V1").Value = "OFF"
-    If ThisWorkbook.Sheets("Data").Range("Y1").Value = "" Then ThisWorkbook.Sheets("Data").Range("Y1").Value = "OFF"
+    ' Initialise ribbon/filter settings (if not yet set):
+    '   FarmFilter = "All" / "Mahela" / "Other" - used in Power Query M code
+    '   ValenciaGrouping = "ON" groups DEL/APV/MKN/GSV as "VAL"; "OFF" keeps separate
+    '   WeekAutoMode = "ON" = use today's pick ref; "OFF" = user must enter
+    If GetAppSetting("FarmFilter", "") = "" Then SetAppSetting "FarmFilter", "All"
+    If GetAppSetting("ValenciaGrouping", "") = "" Then SetAppSetting "ValenciaGrouping", "OFF"
+    If GetAppSetting("WeekAutoMode", "") = "" Then SetAppSetting "WeekAutoMode", "OFF"
 
-    ' Calculate and store the current Pick Reference codes in Data!Z1 and Data!AA1.
+    ' Calculate and store the current Pick Reference codes as PickRef1/PickRef2.
     ' Pick References are encoded as a 4-digit string combining week number and day.
     ' The encoding differs for week numbers < 10 vs >= 10 to keep them sortable.
     '
-    ' Z1  = "Start of week" pick ref  (e.g. week 7 = "7100")
-    ' AA1 = "Current day" pick ref    (e.g. week 7 Monday = "7100", Tuesday = "7200")
+    ' PickRef1 = "Start of week" pick ref  (e.g. week 7 = "7100")
+    ' PickRef2 = "Current day" pick ref    (e.g. week 7 Monday = "7100", Tuesday = "7200")
     '
     ' TODO: The magic number 35 in GetRainbowColor and the encoding logic here
     '       are interrelated. If the pick ref format changes, update both places.
     If WorksheetFunction.WeekNum(Date, vbSunday) < 10 Then
         ' Single-digit week: format is WeekNum & DayOfWeek & "00"
-        ThisWorkbook.Sheets("Data").Range("AA1").Value = WorksheetFunction.WeekNum(Date, vbMonday) & Weekday(Date, vbMonday) & "00"
-        ThisWorkbook.Sheets("Data").Range("Z1").Value = WorksheetFunction.WeekNum(Date, vbMonday) & "100"
+        SetAppSetting "PickRef2", WorksheetFunction.WeekNum(Date, vbMonday) & Weekday(Date, vbMonday) & "00"
+        SetAppSetting "PickRef1", WorksheetFunction.WeekNum(Date, vbMonday) & "100"
     Else
         ' Double-digit week: split the digits so the string stays 4 chars and sortable
         ' e.g. week 12, day 3 => "2103" (last digit of week & "10" & first digit of week... CHECK THIS)
         ' TODO: This encoding is non-obvious. Consider a cleaner approach or add a unit test.
-        ThisWorkbook.Sheets("Data").Range("AA1").Value = Right(Str(WorksheetFunction.WeekNum(Date, vbMonday)), 1) & Weekday(Date, vbMonday) & "0" & Mid(Str(WorksheetFunction.WeekNum(Date, vbMonday)), 2, 1)
-        ThisWorkbook.Sheets("Data").Range("Z1").Value = Right(Str(WorksheetFunction.WeekNum(Date, vbMonday)), 1) & "10" & Mid(Str(WorksheetFunction.WeekNum(Date, vbMonday)), 2, 1)
+        SetAppSetting "PickRef2", Right(Str(WorksheetFunction.WeekNum(Date, vbMonday)), 1) & Weekday(Date, vbMonday) & "0" & Mid(Str(WorksheetFunction.WeekNum(Date, vbMonday)), 2, 1)
+        SetAppSetting "PickRef1", Right(Str(WorksheetFunction.WeekNum(Date, vbMonday)), 1) & "10" & Mid(Str(WorksheetFunction.WeekNum(Date, vbMonday)), 2, 1)
     End If
 
 End Sub
@@ -153,7 +153,7 @@ Function tableExists(sheetName As String, tableName As String) As Boolean
     Set ws = ThisWorkbook.Sheets(sheetName)
     If ws Is Nothing Then Exit Function
     For Each tbl In ws.ListObjects
-        If tbl.Name = tableName Then
+        If tbl.name = tableName Then
             tableExists = True
             Exit Function
         End If
@@ -570,13 +570,13 @@ Public Sub Setup_Stuff()
     pName = "Pakplan"
     answer = "6"   ' "6" = vbYes
 
-    ' Ensure control cells on Data sheet are initialised
-    If ThisWorkbook.Sheets("Data").Range("U1").Value = "" Then ThisWorkbook.Sheets("Data").Range("U1").Value = "All"
-    If ThisWorkbook.Sheets("Data").Range("V1").Value = "" Then ThisWorkbook.Sheets("Data").Range("V1").Value = "OFF"
+    ' Ensure ribbon settings are initialised
+    If GetAppSetting("FarmFilter", "") = "" Then SetAppSetting "FarmFilter", "All"
+    If GetAppSetting("ValenciaGrouping", "") = "" Then SetAppSetting "ValenciaGrouping", "OFF"
 
     ' Create the Vordering sheet if it doesn't exist; otherwise ask the user
     If Not sheetExists(shName) Then
-        ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count)).Name = shName
+        ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count)).name = shName
         answer = "6"  ' Auto-proceed if sheet is new
     Else
         ThisWorkbook.Sheets(shName).Select
@@ -1102,8 +1102,8 @@ Public Sub Update_Stuff()
     found = False: found2 = False
     weeksnum = 2: weekfnum = finalRow
     testvar = -1: testvar2 = -1
-    p1 = ThisWorkbook.Worksheets(ansName).Range("Z1").Value   ' Previously saved start ref
-    p2 = ThisWorkbook.Worksheets(ansName).Range("AA1").Value  ' Previously saved end ref
+    p1 = GetAppSetting("PickRef1", "")   ' Previously saved start ref
+    p2 = GetAppSetting("PickRef2", "")   ' Previously saved end ref
     ans = "7"   ' "7" = vbNo default
 
     ' --- Calculate today's pick reference strings ---
@@ -1118,7 +1118,7 @@ Public Sub Update_Stuff()
     End If
 
     ' Block execution if Y1 is OFF and no saved pick ref exists
-    If ThisWorkbook.Worksheets(ansName).Range("Y1").Value = "OFF" And p1 = "" Then
+    If GetAppSetting("WeekAutoMode", "OFF") = "OFF" And p1 = "" Then
         MsgBox "Please at least select either 'Current Week' or provide a starting Pick Reference.", vbExclamation = vbOKOnly, "Select a Pick Ref."
         OptimizeVBA (False)
         UserForm1.Hide
@@ -1131,7 +1131,7 @@ Public Sub Update_Stuff()
     ' --- Determine pickedref1 (start of range) ---
     ' If Y1 = "OFF", use manual input or saved value; otherwise use today's week start
     ThisWorkbook.Activate
-    If ThisWorkbook.Worksheets(ansName).Range("Y1").Value = "OFF" Then
+    If GetAppSetting("WeekAutoMode", "OFF") = "OFF" Then
         If p1 = "" Then
             ' Prompt user for start pick ref
             Do
@@ -1159,7 +1159,7 @@ Public Sub Update_Stuff()
     pickedref1 = Right(pickedref1, 1) & Left(pickedref1, 3)
 
     ' --- Determine pickedref2 (end of range) ---
-    If ThisWorkbook.Worksheets(ansName).Range("Y1").Value = "OFF" Then
+    If GetAppSetting("WeekAutoMode", "OFF") = "OFF" Then
         ' Discard saved p2 if it's before p1
         If p2 < p1 Then p2 = ""
         If (p2 < curpickref) Then
@@ -1305,22 +1305,22 @@ Public Sub Update_Stuff()
         "    #""Removed SortIndex"" = Table.RemoveColumns(#""Filtered Range"", {""SortIndex""})," & vbCrLf
 
     ' --- Conditional M code: Valencia variety grouping ---
-    ' V1 = "ON": group DEL/APV/MKN/GSV all under "VAL"
-    ' V1 = "OFF": keep each variety separate
-    If ThisWorkbook.Worksheets(ansName).Range("V1").Value = "ON" Then
+    ' ValenciaGrouping = "ON": group DEL/APV/MKN/GSV all under "VAL"
+    ' ValenciaGrouping = "OFF": keep each variety separate
+    If GetAppSetting("ValenciaGrouping", "OFF") = "ON" Then
         mCode = mCode & "    #""Grouped Valencia Varieties"" = Table.AddColumn(#""Removed SortIndex"", ""VARIETY_GROUP"", each if List.Contains({""DEL"", ""APV"", ""MKN"", ""GSV""}, [VARIETY]) then ""VAL"" else [VARIETY])," & vbCrLf
     Else
         mCode = mCode & "    #""Grouped Valencia Varieties"" = Table.AddColumn(#""Removed SortIndex"", ""VARIETY_GROUP"", each [VARIETY])," & vbCrLf
     End If
 
     ' --- Conditional M code: Farm filter ---
-    ' U1 = "Mahela": only own-farm pallets (FARM in OwnFarms list)
-    ' U1 = "All":    all pallets regardless of farm
-    ' Other:         non-own-farm pallets only
-    If ThisWorkbook.Worksheets(ansName).Range("U1").Value = "Mahela" Then
+    ' FarmFilter = "Mahela": only own-farm pallets (FARM in OwnFarms list)
+    ' FarmFilter = "All":    all pallets regardless of farm
+    ' Other:                 non-own-farm pallets only
+    If GetAppSetting("FarmFilter", "All") = "Mahela" Then
         mCode = mCode & "    #""Filtered Own Farms"" = Table.SelectRows(#""Grouped Valencia Varieties"", each List.Contains(OwnFarms, [FARM]))," & vbCrLf & _
             "    #""Merged Dispatch"" = Table.NestedJoin(#""Filtered Own Farms"", {""PALLET_ID""}, Dispatches, {""PALLET_ID""}, ""DispatchLookup"", JoinKind.LeftOuter)," & vbCrLf
-    ElseIf ThisWorkbook.Worksheets(ansName).Range("U1").Value = "All" Then
+    ElseIf GetAppSetting("FarmFilter", "All") = "All" Then
         mCode = mCode & "    #""Merged Dispatch"" = Table.NestedJoin(#""Grouped Valencia Varieties"", {""PALLET_ID""}, Dispatches, {""PALLET_ID""}, ""DispatchLookup"", JoinKind.LeftOuter)," & vbCrLf
     Else
         mCode = mCode & "    #""Filtered Own Farms"" = Table.SelectRows(#""Grouped Valencia Varieties"", each not List.Contains(OwnFarms, [FARM]))," & vbCrLf & _
@@ -1382,7 +1382,7 @@ Public Sub Update_Stuff()
     Short_Stuff
 
     OptimizeVBA (False)
-    ThisWorkbook.Worksheets(ansName).Range("W1").Value = "Last Updated: " & Now()
+    SetAppSetting "LastUpdated", "Last Updated: " & Now()
     DoEvents
     ForceRibbonRefresh
 
@@ -1908,11 +1908,11 @@ Public Sub Export_Stuff()
 
         ' Copy Pakplan sheet (full, with formulas)
         wsCopy.Copy Before:=wbNew.Sheets(1)
-        wbNew.Sheets(1).Name = wsCopy.Name
+        wbNew.Sheets(1).name = wsCopy.name
 
         ' Copy Vordering as values + formats (no live formulas in exported file)
         Set wsNew = wbNew.Sheets.Add(After:=wbNew.Sheets(wbNew.Sheets.Count))
-        wsNew.Name = wsValues.Name
+        wsNew.name = wsValues.name
         wsValues.Cells.Copy
         wsNew.Cells.PasteSpecial Paste:=xlPasteValues
         wsNew.Cells.PasteSpecial Paste:=xlPasteFormats
@@ -1926,7 +1926,7 @@ Public Sub Export_Stuff()
 
         ' Copy Opsomming as values + formats
         Set wsNew = wbNew.Sheets.Add(After:=wbNew.Sheets(wbNew.Sheets.Count))
-        wsNew.Name = wsSummary.Name
+        wsNew.name = wsSummary.name
         wsSummary.Cells.Copy
         wsNew.Cells.PasteSpecial Paste:=xlPasteValues
         wsNew.Cells.PasteSpecial Paste:=xlPasteFormats
@@ -1938,7 +1938,7 @@ Public Sub Export_Stuff()
 
         ' Copy Grafieke (charts) - full copy to preserve chart objects
         wsChart.Copy After:=wbNew.Sheets(wbNew.Sheets.Count)
-        wbNew.Sheets(wbNew.Sheets.Count).Name = wsChart.Name
+        wbNew.Sheets(wbNew.Sheets.Count).name = wsChart.name
 
         ' Set view and delete the default empty Sheet1
         wbNew.Sheets("Vordering").Select
@@ -1995,7 +1995,7 @@ Sub Mail_Stuff(sPath As String, wkn As Integer)
     ' Record the send timestamp in the Data sheet ribbon label cell
     ThisWorkbook.Worksheets("Data").Select
     OptimizeVBA (False)
-    ThisWorkbook.Worksheets("Data").Range("X1").Value = "Last Sent: " & Now()
+    SetAppSetting "LastSent", "Last Sent: " & Now()
     DoEvents
     ForceRibbonRefresh
     OptimizeVBA (True)
@@ -2079,7 +2079,7 @@ Sub Short_Stuff()
 
     ' Create the sheet if needed, otherwise just select it
     If Not sheetExists(short) Then
-        ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count)).Name = short
+        ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count)).name = short
         sanswer = "6"
     Else
         ThisWorkbook.Sheets(short).Select
@@ -2299,7 +2299,7 @@ Sub Chart_Stuff()
 
     ' Create the charts sheet if it doesn't exist
     If Not sheetExists(sChart) Then
-        ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count)).Name = sChart
+        ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count)).name = sChart
     Else
         ThisWorkbook.Sheets(sChart).Select
     End If
