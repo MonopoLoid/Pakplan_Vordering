@@ -1,0 +1,10 @@
+# Pakplan Vordering entitlement flags. Read by LocalConfig.CheckEntitlement.
+# Format: opaque-id|active|inactive  (one per line)
+#
+# IDs must be random and meaningless - never a real name, site, company, or
+# anything else identifying. This file is public and git never truly
+# forgets, so treat every line here as permanent. The mapping from an ID to
+# a real customer lives only in Tiaan's own private, unpublished records.
+#
+# Lines starting with # are ignored.
+a1b2c3d4|active

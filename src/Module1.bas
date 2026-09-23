@@ -560,6 +560,7 @@ End Sub
 Public Sub Setup_Stuff()
     On Error GoTo ErrHandler
     gAbortPipeline = False
+    If Not EnsureEntitled() Then Exit Sub
     InitiateConstants
 
     ' --- Configure progress bar UserForm ---
@@ -1050,6 +1051,7 @@ End Sub
 Public Sub Update_Stuff()
     On Error GoTo ErrHandler
     gAbortPipeline = False
+    If Not EnsureEntitled() Then Exit Sub
     InitiateConstants
     curper = 0
 
@@ -1472,6 +1474,7 @@ End Sub
 Sub Input_Stuff()
     On Error GoTo ErrHandler
     gAbortPipeline = False
+    If Not EnsureEntitled() Then Exit Sub
 
     Dim prog As Double
     Dim ansName As String
@@ -1872,6 +1875,7 @@ End Sub
 Public Sub Export_Stuff()
     On Error GoTo ErrHandler
     gAbortPipeline = False
+    If Not EnsureEntitled() Then Exit Sub
     InitiateConstants
 
     Dim answ As String
@@ -2101,6 +2105,7 @@ End Sub
 Sub Short_Stuff()
     On Error GoTo ErrHandler
     gAbortPipeline = False
+    If Not EnsureEntitled() Then Exit Sub
 
     shName = "Vordering"
     Dim short As String
@@ -2309,6 +2314,7 @@ End Sub
 Sub Chart_Stuff()
     On Error GoTo ErrHandler
     gAbortPipeline = False
+    If Not EnsureEntitled() Then Exit Sub
 
     shName = "Vordering"
     Dim sanswer As String
