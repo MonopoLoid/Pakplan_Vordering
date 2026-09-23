@@ -7,3 +7,8 @@ desktop.ini
 # Contains real email addresses, server names, and computer names.
 # This repo is public - never track this file here.
 src/LocalConfig.bas
+
+# Product planning notes with real customer/business specifics
+# (destination countries, batch/inventory codes, grading data).
+# This repo is public - never track this file here.
+ROADMAP.md
