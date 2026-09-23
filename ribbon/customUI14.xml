@@ -44,6 +44,7 @@
 
         <group id="grpVersion" label="Version">
           <button id="btnUpdateVersion" label="Check for Updates" onAction="Git_Update_R" imageMso="DatabaseLinedTableManager" size="large" screentip="Check for Updates" supertip="Checks GitHub for a newer version of the main code module and installs it if found."/>
+          <button id="btnRevertUpdate" label="Revert Last Update" onAction="RevertLastUpdate_R" imageMso="Undo" size="large" screentip="Revert Last Update" supertip="Reverts back to the version Module1 had before your last update, and asks whether to email Tiaan the reason."/>
           <labelControl id="lblVersion" getLabel="GetVersionLabel"/>
         </group>
       </tab>
