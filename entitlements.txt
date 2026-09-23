@@ -7,4 +7,6 @@
 # a real customer lives only in Tiaan's own private, unpublished records.
 #
 # Lines starting with # are ignored.
-a1b2c3d4|active
+FKfy9LJHg2|active
+V2jQwScMP8|active
+BgbUKCQc2D|inactive
