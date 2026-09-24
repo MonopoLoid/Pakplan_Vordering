@@ -1268,10 +1268,25 @@ Public Sub Update_Stuff()
     End If
 
     ' --- Rearrange pick ref strings into sortable format ---
-    ' If week is <10 then make sure it makes "09" and not just "9"
-    ' Original format: [week][day]["0"][week_digit2] or [week][day]["00"] (4 chars)
-    ' Sortable format: rotate so the 4th char goes first
-    ' This makes them directly comparable as strings.
+    ' HOW: "rotate so the 4th char goes first" means e.g. "2301" becomes
+    ' "1230" (last char moves to the front, the rest shift right). Verified
+    ' with real values: week=12, weekday=3 encodes as "2301" (see the
+    ' week>=10 branch above: last-digit-of-week, weekday, "0",
+    ' first-digit-of-week) - rotating gives "1230", putting the week's
+    ' first digit at the front so string comparison sorts by week first.
+    '
+    ' FINDING (verified, not just suspected): single-digit weeks are NOT
+    ' rotated the same way. week=9 encodes directly as "9300" (no rotation
+    ' needed since it's already "week, day, 00"). Comparing week 9's "9300"
+    ' against week 12's rotated "1230" as plain strings gives "9300" >
+    ' "1230" - i.e. week 9 would sort AFTER week 12, backwards from actual
+    ' chronological order. This only bites right at the week-9-to-10
+    ' boundary of a season, so whether it's ever actually hit depends on
+    ' whether your packing season spans that boundary while pick refs from
+    ' both sides are being compared - worth checking against your own
+    ' calendar rather than assuming either way. This is the same area the
+    ' TODO further up already flagged as "non-obvious... consider a
+    ' cleaner approach" - this finding is a concrete reason why.
     If Len(p1) < 4 Then p1 = "0" & p1
     If Len(p2) < 4 Then p2 = "0" & p2
     p1 = Right(p1, 1) & Left(p1, 3)
@@ -1404,6 +1419,15 @@ Public Sub Update_Stuff()
     '       pick references for the season. If a pick ref is missing from
     '       this list, it will be excluded from results. Update the list
     '       at the start of each new season.
+    '
+    ' NOTE while documenting: OwnFarms below is a list of real farm
+    ' identifier codes, and this file is pushed to the public repo. Lower
+    ' sensitivity than the emails/server names already removed from
+    ' LocalConfig (these codes don't obviously reveal who or where on
+    ' their own), but flagging since it's the same category of "real
+    ' operational data sitting in a public file" - your call whether it's
+    ' worth moving to LocalConfig at some point (fetched into the M code
+    ' as a variable instead of hardcoded here).
     ' =========================================================================
     queryName = "DataQuery"
     mCode = "let" & vbCrLf & _
