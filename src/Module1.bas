@@ -690,6 +690,18 @@ Public Sub Setup_Stuff()
         End If
 
         ' --- Copy header rows from Pakplan to Vordering ---
+        ' FINDING: "Range("A1").End(xlUp)" is a no-op here and everywhere else
+        ' it appears in this loop (also lines below, and in the main loop's
+        ' row-copy step). End(xlUp) searches UPWARD from the anchor cell for
+        ' the last non-empty cell - starting from row 1, there's nowhere to
+        ' go, so it always just returns A1 itself. This is the classic
+        ' "find the last used row" idiom (normally written starting from the
+        ' very BOTTOM of the sheet, e.g. Range("A1048576").End(xlUp)), just
+        ' anchored at the top instead - so it never actually searches
+        ' anything. Functionally identical to plain Range("A1").Offset(...),
+        ' just harder to read. Not fixed here (this pass is about
+        ' understanding, not changing behaviour) - flagging as a real
+        ' candidate for a future cleanup pass.
         ThisWorkbook.Sheets(pName).Cells(1, "A").EntireRow.Copy Destination:=ThisWorkbook.Sheets(shName).Range("A" & 1).End(xlUp).Offset(startline - 3)
         ThisWorkbook.Sheets(pName).Range("A2:AZ2").Copy
         ThisWorkbook.Sheets(shName).Range("A2:AZ2").PasteSpecial xlPasteColumnWidths
@@ -721,7 +733,21 @@ Public Sub Setup_Stuff()
 
             ' j = calculated destination row offset in Vordering.
             ' Each matching line expands into `block` (6) rows, and k counts
-            ' the non-matching (skipped) rows to subtract from the offset.
+            ' the non-matching (skipped) rows to subtract from the offset -
+            ' this is what lets Vordering stay gapless even though Pakplan
+            ' rows get skipped (comment rows, blank rows, etc. that aren't
+            ' H or S). The actual destination row for the copied line itself
+            ' is (1+j); each sub-row uses .Offset(j-i+N), which - because
+            ' the "-i" and the later "+i" from Cells(i,...) cancel out -
+            ' always lands on absolute row (j+N) regardless of what i is.
+            '
+            ' WORKED EXAMPLE (startline=3, block=6), verified numerically:
+            '   i=3 (1st matching row), k=0: j=3  -> line at row 4,  sub-rows 5-9
+            '   i=4 (2nd matching row), k=0: j=9  -> line at row 10, sub-rows 11-15
+            '   i=5: skipped (not H/S)   -> k becomes 1
+            '   i=6 (3rd matching row), k=1: j=15 -> line at row 16, sub-rows 17-21
+            ' Notice rows 4-9, 10-15, 16-21 are perfectly back-to-back even
+            ' though Pakplan row 5 was skipped in between - that's k doing its job.
             j = (i - (startline - 1)) * block - (k * block) - (block - startline)
 
             ' Only process rows flagged as H (Half pallet) or S (Standard)
@@ -901,7 +927,18 @@ Public Sub Setup_Stuff()
                     ThisWorkbook.Sheets(shName).Range(sColterm & i).Offset(j - i + 6).Formula = cartonCount
 
                     ' Row 2 = Pallets Needed:
-                    '   If the Pakplan cell has an asterisk (*), this is a "split size"
+                    '   HOW THE CONDITION WORKS: InStr returns 0 when the search text
+                    '   isn't found, or a positive position when it is. Adding four
+                    '   InStr() calls together and checking "<> 0" is equivalent to
+                    '   "is at least one of these found" (OR'd together) - it can only
+                    '   sum to exactly 0 if ALL FOUR come back as 0.
+                    '   WHAT IT'S ACTUALLY CHECKING: despite the comment below only
+                    '   mentioning the asterisk, this also fires on "L", "M", or "S"
+                    '   appearing anywhere in the cell - almost certainly the same
+                    '   Large/Medium/Small size-override markers used elsewhere in the
+                    '   codebase (see SizeMapping), meaning this cell holds a marker
+                    '   or a compound value rather than a plain number either way.
+                    '   If any of "*", "L", "M", "S" appear, this is a "split size"
                     '   line - add Stock + Dispatched from other rows instead.
                     If InStr(1, ThisWorkbook.Sheets(shName).Range(colvar & i).Offset(j - i + 1).Value, "*") + InStr(1, ThisWorkbook.Sheets(shName).Range(colvar & i).Offset(j - i + 1).Value, "L") + InStr(1, ThisWorkbook.Sheets(shName).Range(colvar & i).Offset(j - i + 1).Value, "M") + InStr(1, ThisWorkbook.Sheets(shName).Range(colvar & i).Offset(j - i + 1).Value, "S") <> 0 Then
                         ' Asterisk = use stock+dispatched sum instead (5.4.11.1 fix)
@@ -918,6 +955,24 @@ Public Sub Setup_Stuff()
                         "=IFERROR(" & colvar & (curRow - 1) & "-(" & colvar & (curRow + 1) & "+" & colvar & (curRow + 3) & "),0)"
 
                     ' Row 5 = Pallets Overpacked: formula differs by "As Ordered" logic
+                    ' At this point curRow = the Overpacked row itself, so relative
+                    ' to it: curRow-3=Needed, curRow-2=Outstanding, curRow-1=In Stock,
+                    ' curRow+1=Dispatched (this is the same 6-row block, just addressed
+                    ' from a different anchor point than earlier in this loop).
+                    '
+                    ' PLAIN-ENGLISH TRANSLATION of the "As Ordered" formula below:
+                    '   IF Outstanding < 0 THEN -Outstanding
+                    '   ELSE IF (InStock + Dispatched) - Needed > 0 THEN that difference
+                    '   ELSE 0
+                    ' Outstanding is itself "Needed - (InStock + Dispatched)" (see the
+                    ' row-3 formula just above), so "Outstanding < 0" and
+                    ' "(InStock+Dispatched) - Needed > 0" are algebraically the *same*
+                    ' condition, just negated. That means once you reach the ELSE
+                    ' branch (Outstanding >= 0), the inner ">0" check can never be
+                    ' true - it always falls through to 0. Worth double-checking
+                    ' against real data rather than taking my algebra on faith, but
+                    ' if that holds, the inner IF is dead weight and this could
+                    ' simplify to "IF(Outstanding<0, -Outstanding, 0)".
                     curRow = curRow + 2
                     If IsCountAsOrdered(ThisWorkbook.Sheets(shName).Range(colvar & startline).Formula, commentCheck) Then
                         ' "As Ordered": overpack = how much above the ordered count was packed/dispatched
