@@ -2039,6 +2039,11 @@ Public Sub Export_Stuff()
     InitiateConstants
 
     Dim answ As String
+    ' MsgBox actually returns an Integer (vbYes = 6, vbNo = 7); assigning it into
+    ' a String variable auto-converts it to the text "6"/"7", which is why the
+    ' check below compares against the literal string "6" instead of vbYes.
+    ' Comparing answ = vbYes directly would read more clearly, but works the
+    ' same either way.
     answ = MsgBox("Do you want to Save & Send?", vbQuestion + vbYesNo, "User Response")
 
     If answ = "6" Then   ' User confirmed
@@ -2276,6 +2281,13 @@ Sub Short_Stuff()
 
     checkLoad = False
     short = "Opsomming"
+    ' FINDING: sanswer is set to "6" here, and again in the "create sheet" branch
+    ' below, but the "sheet already exists" branch never changes it - so by the
+    ' time we reach "If sanswer = "6"" further down, it is unconditionally "6"
+    ' on every code path. That condition can never be False. This looks like a
+    ' leftover from an earlier version that asked something like "Overwrite
+    ' existing summary?" via MsgBox and stored the vbYes/vbNo answer in
+    ' sanswer - worth either removing the dead check or restoring the prompt.
     sanswer = "6"
     totCol = ThisWorkbook.Sheets(shName).Range("Q" & startline & ":AZ" & startline).Find("TOTAL", , xlValues, xlWhole).Column + 64
     iRows = (ThisWorkbook.Sheets(shName).Range("A" & startline & ":A" & 1000).Find("GRAND TOTA*", , xlValues, xlWhole).Row + 5) * 3
@@ -2338,6 +2350,8 @@ Sub Short_Stuff()
         Dim k As Integer
         k = 1   ' Current row in Opsomming (starts at 1 = header)
 
+        ' FINDING: sLine is declared but never assigned or read anywhere in this
+        ' Sub (or the rest of the module) - safe to remove.
         Dim sLine(16) As String
 
         ' --- Main loop: copy "Pallets Outstanding" rows from Vordering to Opsomming ---
@@ -2602,7 +2616,15 @@ Sub Chart_Stuff()
                 .DataLabels.ShowCategoryName = False
                 .DataLabels.Font.Bold = True
                 .DataLabels.Font.Size = 11
-                ' Remove data labels for zero slices (keeps chart clean)
+                ' Remove data labels for zero slices (keeps chart clean).
+                ' WORTH CHECKING: this loop runs unconditionally, so in the
+                ' all-zero branch above it will also match the "0" label we
+                ' just deliberately set on Points(1) two lines up (the one the
+                ' header comment describes as "an empty chart with a '0'
+                ' label") and delete it too - meaning a fully empty item may
+                ' end up with no label at all rather than the intended "0".
+                ' Worth confirming visually next time an item has zero pallets
+                ' needed and zero packed.
                 Dim pt As Point
                 For Each pt In .Points
                     If pt.DataLabel.text = "0" Then pt.DataLabel.Delete
