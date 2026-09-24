@@ -172,15 +172,35 @@ End Function
 
 ' =============================================================================
 ' HELPER: fnDateFromWeek
-' Calculates a specific date from a year, ISO week number, and weekday.
-' e.g. fnDateFromWeek(2025, 7, 1) = the Monday of week 7 in 2025
+' Calculates a specific date from a year, ISO-ish week number, and weekday.
+'
+' NOT CURRENTLY CALLED FROM ANYWHERE in this module - kept for reference or
+' possible future use. Flagging rather than removing since you're reading
+' through to decide what's worth keeping.
 '
 ' PARAMETERS:
-'   iYear    - 4-digit year
-'   iWeek    - Week number (1-53)
-'   iWeekDday - Day of week (1=Mon, 7=Sun depending on locale)
+'   iYear     - 4-digit year
+'   iWeek     - Week number (1-53)
+'   iWeekDday - Day within that week. The function calls Weekday() with no
+'               override, so VBA's default applies: 1=Sunday, 2=Monday, ...
+'               7=Saturday - verified below, not "1=Mon" as you might guess.
 ' =============================================================================
 Function fnDateFromWeek(ByVal iYear As Integer, ByVal iWeek As Integer, ByVal iWeekDday As Integer)
+    ' HOW: DateSerial(iYear, 1, N) means "day N counting from Jan 1 of iYear" -
+    ' N doesn't have to be a valid day-of-January number, VBA just rolls the
+    ' date forward that many days, which is what makes this one-liner work.
+    '   (iWeek - 1) * 7          -> how many full weeks to skip before week iWeek
+    '   + iWeekDday              -> then step to the target day within that week
+    '   - Weekday(Jan1) + 1      -> correction so "day 1 of week 1" lines up with
+    '                               whatever weekday Jan 1 actually falls on that
+    '                               year (Jan 1 isn't always a Monday)
+    ' Example: iYear=2026, iWeek=7, iWeekDday=1 (Sunday, per the default above).
+    '   Jan 1, 2026 is a Thursday, so Weekday(Jan1)=5.
+    '   (7-1)*7 + 1 - 5 + 1 = 42 + 1 - 5 + 1 = 39
+    '   DateSerial(2026, 1, 39) rolls 39 days past Jan 1 -> 8 Feb 2026,
+    '   which is indeed a Sunday, and the start of week 7.
+    '   (Verified numerically, not just by hand - see if this matches your
+    '   own understanding of which day the callers actually pass in.)
     fnDateFromWeek = DateSerial(iYear, 1, ((iWeek - 1) * 7) + iWeekDday - Weekday(DateSerial(iYear, 1, 1)) + 1)
 End Function
 
@@ -200,6 +220,9 @@ End Function
 ' =============================================================================
 Public Function charCheck(charVal) As String
     If charVal > 90 Then
+        ' -26 wraps back into the A-Z range: 91 ("Z"+1) becomes 65 ("A") again,
+        ' so charVal=91 -> Chr(65)="A" -> result "AA". charVal=92 -> Chr(66)="B"
+        ' -> result "AB". It's re-using the same 65-90 range as a second "digit".
         charCheck = "A" & Chr(charVal - 26)
     Else
         charCheck = Chr(charVal)
@@ -254,6 +277,16 @@ End Sub
 ' NOTE: The value 35 is the cycle length. It was empirically chosen.
 '       If you change the number of colour steps or the range, update this value.
 '       The steps array defines: Red -> Orange -> Yellow -> Green -> Blue -> Violet -> Red
+'
+' WORKED EXAMPLE: progress=17 (out of the 0-35 cycle).
+'   7 stops means UBound(steps)=6, so pos = 17/6 = 2.833.
+'   i = Int(2.833) = 2  -> we're between steps(2)=Yellow and steps(3)=Green.
+'   t = 2.833 - 2 = 0.833  -> 83.3% of the way from Yellow to Green.
+'   r = 255 + 0.833*(0-255)   ~ 42
+'   g = 255 + 0.833*(255-255)  = 255
+'   b = 0   + 0.833*(0-0)      = 0
+'   -> a yellow-green, which is exactly what you'd expect 83% of the way
+'      from pure yellow toward pure green.
 ' =============================================================================
 Function GetRainbowColor(progress As Double) As Long
     ' Define 7 colour stops for the full spectrum (the last repeats the first to close the loop)
@@ -311,6 +344,14 @@ End Function
 ' PARAMETERS:
 '   progress - A value between 0.0 (start) and 1.0 (complete)
 '              Values outside this range are clamped.
+'
+' MINOR QUIRK (found while documenting, not fixed - your call whether it's
+' worth touching): the two phases aren't quite continuous at progress=0.5.
+' Phase 1 approaches g=255*(0.5/0.5)=255 as progress nears 0.5 from below.
+' Phase 2 at progress=0.5 exactly gives g=255-(0.5*255/8)=239.06. That's a
+' visible ~16-unit dip in the green channel right at the halfway point -
+' probably imperceptible during a fast-moving progress bar, but it's a real,
+' verifiable discontinuity, not just a rounding artifact.
 ' =============================================================================
 Function GetProgressColor(progress As Double) As Long
     If progress < 0 Then progress = 0
@@ -326,9 +367,15 @@ Function GetProgressColor(progress As Double) As Long
         g = 255 * (progress / 0.5)
     Else
         ' Phase 2 (50% to 100%): Yellow to Green
-        ' Red ramps down from 255 to 0; green stays near 255 (slight fade)
+        ' Red ramps down from 255 to 0.
+        ' Green *should* stay at 255 for a pure Yellow->Green fade, but this
+        ' formula ties it to `progress` itself (not the 0-1 phase-2 fraction),
+        ' so it drifts down to 255-(1*255/8)=223 by the time progress=1.0 -
+        ' a deliberate "slight fade to avoid overly bright green" per the
+        ' original comment here, not a mistake, just worth knowing it's
+        ' progress-linked rather than a fixed target colour.
         r = 255 * (1 - ((progress - 0.5) / 0.5))
-        g = 255 - (progress * 255 / 8)   ' Slight fade to avoid overly bright green
+        g = 255 - (progress * 255 / 8)
     End If
 
     GetProgressColor = RGB(r, g, b)
