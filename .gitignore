@@ -12,3 +12,9 @@ src/LocalConfig.bas
 # (destination countries, batch/inventory codes, grading data).
 # This repo is public - never track this file here.
 ROADMAP.md
+
+# Old dev-history workbook snapshots, predating the LocalConfig split -
+# almost certainly contain real emails/server/computer names directly in
+# their VBA, not behind any gitignored module. This repo is public - never
+# track these here.
+Previous versions/
