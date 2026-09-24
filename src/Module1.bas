@@ -1717,6 +1717,16 @@ Sub Input_Stuff()
                        (.Cells(dval, 11).Value = .Cells(ivalue, 11).Value) And _
                        (.Cells(dval, 16).Value = "D" & .Cells(ivalue, 16).Value) And _
                        (Not IsEmpty(.Cells(ivalue, 3))) Then
+                        ' charCheck(j+64) turns the column NUMBER back into its own
+                        ' letter (j is always 17-26 here, i.e. Q-Z, well inside the
+                        ' plain Chr(64+n) trick charCheck falls back to for single
+                        ' letters - see charCheck's own comment). So this appends
+                        ' "-<sameCol><dval+3>-<sameCol><dval+5>-0" to the formula
+                        ' already sitting in that cell: subtract the neighbour
+                        ' block's Stock and Dispatched cells, then a literal "-0"
+                        ' tail. The "-0" is a marker, checked below, so this
+                        ' subtraction is only appended once per cell even if
+                        ' Input_Stuff runs again on top of an already-patched sheet.
                         If Not (Right(.Cells(ivalue + 1, j).Formula, 2) = "-0") Then
                             .Cells(ivalue + 1, j).Formula = .Cells(ivalue + 1, j).Formula & "-" & charCheck(j + 64) & (dval + 3) & "-" & charCheck(j + 64) & (dval + 5) & "-0"
                         End If
@@ -1771,7 +1781,14 @@ Sub Input_Stuff()
                            (.Cells(dval, 16).Value = "D" & .Cells(ivalue, 16).Value) And _
                            (Not IsEmpty(.Cells(ivalue, 3))) Then
                             If Not (Right(.Cells(ivalue + 1, j).Formula, 2) = "-0") Then
-                                ' Currently shows a debug MsgBox - TODO: replace with logging
+                                ' FINDING: this is a leftover debug prompt, not a
+                                ' user-facing warning - it just dumps the cell's
+                                ' current value with no explanation of what it means
+                                ' or why it's being shown. If this condition is ever
+                                ' true during a real Update Data run, whoever is
+                                ' sitting at the keyboard gets a blocking MsgBox they
+                                ' can't make sense of. Worth deciding whether to
+                                ' remove it, or turn it into a real message/log entry.
                                 MsgBox (.Cells(ivalue + 1, j).Value)
                             End If
                         End If
@@ -1823,7 +1840,15 @@ Sub Input_Stuff()
                 Dim arrNextCount() As Integer
                 Dim iNumb As Integer
                 iNumb = i - 2
-                ' Find the next occurrence of the same line (the duplicate)
+                ' Find the next occurrence of the same line (the duplicate).
+                ' NOTE: arrNextCount is only ever filled when stillLeft first
+                ' becomes 1 (the "If stillLeft = 1 Then" guard below) - it snapshots
+                ' whichever matching row is found FIRST as k counts up. If a third
+                ' or later matching row also exists further down the sheet,
+                ' stillLeft keeps incrementing for it, but its per-size-column
+                ' counts are never captured into arrNextCount. In practice this
+                ' only matters when the same attributes appear 3+ times, which the
+                ' redistribution logic below doesn't otherwise account for either.
                 For k = i To (vorRows - 5)
                     With ThisWorkbook.Worksheets(shName)
                         If ((.Cells(iNumb, 3).Value = .Cells(k, 3).Value) And _
@@ -1867,6 +1892,15 @@ Sub Input_Stuff()
                     iOut = ThisWorkbook.Worksheets(shName).Cells(i, 16).Value
                     iStock = ThisWorkbook.Worksheets(shName).Cells(i + 1, 16).Value
                     iDisp = ThisWorkbook.Worksheets(shName).Cells(i + 3, 16).Value
+
+                    ' `changable` is the running total, across size columns, of how
+                    ' many pallets are still available to move for this phase - it's
+                    ' only counted from size columns where arrNextCount(j-17) > 0,
+                    ' i.e. columns where the duplicate row actually has stock to draw
+                    ' from. Each Do-loop iteration below moves exactly one pallet in
+                    ' one column and decrements `changable`, so the loop is
+                    ' guaranteed to terminate once every movable pallet has been used
+                    ' or the target (iDisp = iNeed / iOut = 0) is reached.
 
                     ' --- Phase 1: Reduce Dispatched to match Needed ---
                     ' If more was dispatched than needed, move some back to Stock
