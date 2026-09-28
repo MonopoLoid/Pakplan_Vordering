@@ -1415,10 +1415,22 @@ Public Sub Update_Stuff()
     ' Valencia varieties, optionally filters to own-farm pallets,
     ' and left-joins with Dispatches to add a DISPATCH_MATCH column.
     '
-    ' NOTE: The CustomOrder list defines the chronological order of all
-    '       pick references for the season. If a pick ref is missing from
-    '       this list, it will be excluded from results. Update the list
-    '       at the start of each new season.
+    ' NOTE: Pick references are 4-character codes combining week+day, with a
+    '       digit-rotation trick to keep 2-digit weeks 4 characters long (see
+    '       the PickRef-building comments earlier in this Sub). Comparing
+    '       these codes as plain text sorts wrong in places, so the M code
+    '       below decodes each PICK_REF back into its real (week, day) and
+    '       filters on that computed key instead of the raw string.
+    '
+    ' HISTORY: this used to be a hardcoded CustomOrder list of every valid
+    ' pick ref for the season, ranked via List.PositionOf. That broke
+    ' silently on 2026-09-28 when the season ran past week 39 (further than
+    ' any previous season had) - List.PositionOf returns -1 for a pick ref
+    ' the list doesn't contain, and since every real row's position is >= 0,
+    ' "SortIndex <= -1" matched nothing at all, not just the missing week.
+    ' Decoding the pick ref algorithmically removes the list (and its
+    ' per-season maintenance) entirely - it works for any week number, not
+    ' just the ones someone remembered to type in ahead of time.
     '
     ' NOTE while documenting: OwnFarms below is a list of real farm
     ' identifier codes, and this file is pushed to the public repo. Lower
@@ -1437,16 +1449,37 @@ Public Sub Update_Stuff()
         "    #""Changed Type"" = Table.TransformColumnTypes(#""Removed Other Columns"",{{""PALLET_ID"", type text}, {""CONS_NO"", type text}, {""ORGZN"", type text}, {""VARIETY"", type text}, {""PACK"", type text}, {""GRADE"", type text}, {""MARK"", type text}, {""SIZE_COUNT"", type text}, {""INV_CODE"", type text}, {""PICK_REF"", type text}, {""FARM"", type text}, {""TARG_MKT"", type text}, {""BATCH_NO"", type text}, {""TARGET_COUNTRY"", type text}, {""TARGET_REGION"", type text}})," & vbCrLf & _
         "    #""Trimmed Text"" = Table.TransformColumns(#""Changed Type"",{{""PALLET_ID"", Text.Trim, type text}, {""CONS_NO"", Text.Trim, type text}, {""ORGZN"", Text.Trim, type text}, {""VARIETY"", Text.Trim, type text}, {""PACK"", Text.Trim, type text}, {""GRADE"", Text.Trim, type text}, {""MARK"", Text.Trim, type text}, {""SIZE_COUNT"", Text.Trim, type text}, {""INV_CODE"", Text.Trim, type text}, {""PICK_REF"", Text.Trim, type text}, {""FARM"", Text.Trim, type text}, {""TARG_MKT"", Text.Trim, type text}, {""REASON"", Text.Trim, type text}, {""BATCH_NO"", Text.Trim, type text}, {""TARGET_COUNTRY"", Text.Trim, type text}, {""TARGET_REGION"", Text.Trim, type text}})," & vbCrLf & _
         "    #""Reordered Columns"" = Table.ReorderColumns(#""Trimmed Text"",{""PICK_REF"", ""CONS_NO"", ""ORGZN"", ""VARIETY"", ""TARG_MKT"", ""GRADE"", ""MARK"", ""PACK"", ""INV_CODE"", ""TARGET_REGION"", ""TARGET_COUNTRY"", ""BATCH_NO"", ""SIZE_COUNT"", ""FARM"", ""PALLET_ID"", ""REASON""})," & vbCrLf & _
-        "    OwnFarms = {""D6613"", ""D6592"", ""D6612"", ""D9483"", ""D17440"", ""D6611"", ""D6814"", ""D6631"", ""D0534"", ""D0991"", ""D6595"", ""D0992"", ""D15976"", ""D17273"", ""D15563"", ""D15155"", ""D14034"", ""D13867""}," & vbCrLf & _
-        "    CustomOrder = {""7100"", ""7200"", ""7300"", ""7400"", ""7500"", ""7600"", ""7700"", ""8100"", ""8200"", ""8300"", ""8400"", ""8500"", ""8600"", ""8700"", ""9100"", ""9200"", ""9300"", ""9400"", ""9500"", ""9600"", ""9700"", ""0101"", ""0201"", ""0301"", ""0401"", ""0501"", ""0601"", ""0701"", ""1101"", ""1201"", ""1301"", ""1401"", ""1501"", ""1601"", ""1701"", ""2101"", ""2201"", ""2301"", ""2401"", ""2501"", ""2601"", ""2701"", ""3101"", ""3201"", ""3301"", ""3401"", ""3501"", ""3601"", ""3701"", ""4101"", ""4201"", ""4301"", ""4401"", ""4501"", ""4601"", ""4701"", ""5101"", ""5201"", ""5301"", ""5401"", ""5501"", ""5601"", ""5701"", ""6101"", ""6201"", ""6301"", ""6401"", ""6501"", ""6601"", ""6701"", ""7101"", ""7201"", ""7301"", ""7401"", ""7501"", ""7601"", ""7701"", ""8101"", ""8201"", ""8301"", ""8401"", ""8501"", ""8601"", ""8701"", ""9101"", ""9201"", ""9301"", ""9401"", ""9501"", ""9601"", ""9701"", ""0102"", ""0202"", ""0302"", ""0402"", ""0502"", ""0602"", ""0702"", " & Chr(34) & _
-        "1102"", ""1202"",""1302"", ""1402"", ""1502"", ""1602"", ""1702"", ""2102"", ""2202"", ""2302"", ""2402"", ""2502"", ""2602"", ""2702"", ""3102"", ""3202"", ""3302"", ""3402"", ""3502"", ""3602"", ""3702"", ""4102"", ""4202"", ""4302"", ""4402"", ""4502"", ""4602"", ""4702"", ""5102"", ""5202"", ""5302"", ""5402"", ""5502"", ""5602"", ""5702"", ""6102"", ""6202"", ""6302"", ""6402"", ""6502"", ""6602"", ""6702"", ""7102"", ""7202"", ""7302"", ""7402"", ""7502"", ""7602"", ""7702"", ""8102"", ""8202"", ""8302"", ""8402"", ""8502"", ""8602"", ""8702"", ""9102"", ""9202"", ""9302"", ""9402"", ""9502"", ""9602"", ""9702"", ""0103"", ""0203"", ""0303"", ""0403"", ""0503"", ""0603"", ""0703"", ""1103"", ""1203"", ""1303"", ""1403"", ""1503"", ""1603"", ""1703"", ""2103"", ""2203"", ""2303"", ""2403"", ""2503"", ""2603"", ""2703"", " & Chr(34) & _
-        "3103"", ""3203"", ""3303"", ""3403"", ""3503"", ""3603"", ""3703"", ""4103"", ""4203"", ""4303"", ""4403"", ""4503"", ""4603"", ""4703"", ""5103"", ""5203"", ""5303"", ""5403"", ""5503"", ""5603"", ""5703"", ""6103"", ""6203"", ""6303"", ""6403"", ""6503"", ""6603"", ""6703"", ""7103"", ""7203"", ""7303"", ""7403"", ""7503"", ""7603"", ""7703"", ""8103"", ""8203"", ""8303"", ""8403"", ""8503"", ""8603"", ""8703"", ""9103"", ""9203"", ""9303"", ""9403"", ""9503"", ""9603"", ""9703""}," & vbCrLf & _
+        "    OwnFarms = {""D6613"", ""D6592"", ""D6612"", ""D9483"", ""D17440"", ""D6611"", ""D6814"", ""D6631"", ""D0534"", ""D0991"", ""D6595"", ""D0992"", ""D15976"", ""D17273"", ""D15563"", ""D15155"", ""D14034"", ""D13867""}," & vbCrLf
+
+    ' Split into a second statement here - VBA caps the number of line
+    ' continuations allowed in a single statement, and the M code being
+    ' built is long enough that appending the pick-ref decode logic to the
+    ' statement above pushed it past that limit (hit this the hard way on
+    ' 2026-09-28: AddFromString failed with "Too many line continuations"
+    ' and - since DeleteLines had already cleared the module first - briefly
+    ' left Module1 empty before the corrected version below was pushed back
+    ' in). Same append-another-statement pattern the Valencia/farm-filter
+    ' conditionals further down already use.
+    mCode = mCode & _
+        "    // Decodes a 4-char pick ref into a real week*10+day sort key." & vbCrLf & _
+        "    // 4th char ""0"" means a single-digit-week code (week is just" & vbCrLf & _
+        "    // the 1st char); otherwise the week is the 4th char followed" & vbCrLf & _
+        "    // by the 1st char (that pair is the real week number)." & vbCrLf & _
+        "    DecodePickRefKey = (pr as text) as number =>" & vbCrLf & _
+        "        let" & vbCrLf & _
+        "            firstChar = Text.At(pr, 0)," & vbCrLf & _
+        "            dayChar = Text.At(pr, 1)," & vbCrLf & _
+        "            modeChar = Text.At(pr, 3)," & vbCrLf & _
+        "            week = if modeChar = ""0"" then Number.FromText(firstChar) else Number.FromText(modeChar & firstChar)," & vbCrLf & _
+        "            day = Number.FromText(dayChar)" & vbCrLf & _
+        "        in" & vbCrLf & _
+        "            week * 10 + day," & vbCrLf & _
         "    StartValue = " & Chr(34) & pickedref1 & Chr(34) & "," & vbCrLf & _
         "    EndValue = " & Chr(34) & pickedref2 & Chr(34) & "," & vbCrLf & _
-        "    StartIndex = List.PositionOf(CustomOrder, StartValue)," & vbCrLf & _
-        "    EndIndex = List.PositionOf(CustomOrder, EndValue)," & vbCrLf & _
-        "    #""Added Sort Index"" = Table.AddColumn(#""Reordered Columns"", ""SortIndex"", each List.PositionOf(CustomOrder, [PICK_REF]), Int64.Type)," & vbCrLf & _
-        "    #""Filtered Range"" = Table.SelectRows(#""Added Sort Index"", each [SortIndex] >= StartIndex and [SortIndex] <= EndIndex)," & vbCrLf & _
+        "    StartIndex = DecodePickRefKey(StartValue)," & vbCrLf & _
+        "    EndIndex = DecodePickRefKey(EndValue)," & vbCrLf & _
+        "    #""Added Sort Index"" = Table.AddColumn(#""Reordered Columns"", ""SortIndex"", each try DecodePickRefKey([PICK_REF]) otherwise null, Int64.Type)," & vbCrLf & _
+        "    #""Filtered Range"" = Table.SelectRows(#""Added Sort Index"", each [SortIndex] <> null and [SortIndex] >= StartIndex and [SortIndex] <= EndIndex)," & vbCrLf & _
         "    #""Removed SortIndex"" = Table.RemoveColumns(#""Filtered Range"", {""SortIndex""})," & vbCrLf
 
     ' --- Conditional M code: Valencia variety grouping ---
