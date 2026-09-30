@@ -584,7 +584,7 @@ End Function
 ' individual pack can have its own count), then brand multiplies
 ' across whatever pack/count pairs result.
 '
-' BEHAVIOUR CHANGE FROM THE OLD SPLIT ASSEMBLY - PLEASE CONFIRM:
+' BEHAVIOUR CHANGE FROM THE OLD SPLIT ASSEMBLY - CONFIRMED 2026-09-30:
 ' The dispatch-flag criterion ($Q:$Q,1) used to be added only to the
 ' FIRST summed term (inside the old size-only helper) and separately
 ' to whatever ended up being the LAST term (via the calling Sub's own
@@ -592,9 +592,7 @@ End Function
 ' whenever there were 3 or more. That was invisible with at most two
 ' terms; it won't stay invisible with brand x pack x size
 ' combinations. This version applies $Q:$Q,1 to EVERY term when
-' sPack <> "PACKHOUSE", uniformly. If the old first/last-only
-' behaviour was actually intentional for some reason, tell me and
-' I'll revert this specific piece.
+' sPack <> "PACKHOUSE", uniformly - confirmed correct, keep as-is.
 ' ---------------------------------------------------------------
 Public Function BuildFullFormula(ByVal shName As String, ByVal ansName As String, ByVal startline As Long, _
                                   ByVal j As Long, ByVal vals As Long, ByVal sPack As String, _

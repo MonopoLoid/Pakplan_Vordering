@@ -120,7 +120,7 @@ Public Sub EnsureDataSheetDefaults()
         SetAppSetting "PickRef1", WorksheetFunction.WeekNum(Date, vbMonday) & "100"
     Else
         ' Double-digit week: split the digits so the string stays 4 chars and sortable
-        ' e.g. week 12, day 3 => "2103" (last digit of week & "10" & first digit of week... CHECK THIS)
+        ' e.g. week 12, day 3 => "2301" (last digit of week & "10" & first digit of week... CHECK THIS)
         ' TODO: This encoding is non-obvious. Consider a cleaner approach or add a unit test.
         SetAppSetting "PickRef2", Right(Str(WorksheetFunction.WeekNum(Date, vbMonday)), 1) & Weekday(Date, vbMonday) & "0" & Mid(Str(WorksheetFunction.WeekNum(Date, vbMonday)), 2, 1)
         SetAppSetting "PickRef1", Right(Str(WorksheetFunction.WeekNum(Date, vbMonday)), 1) & "10" & Mid(Str(WorksheetFunction.WeekNum(Date, vbMonday)), 2, 1)
@@ -174,10 +174,10 @@ End Function
 ' HELPER: fnDateFromWeek
 ' Calculates a specific date from a year, ISO-ish week number, and weekday.
 '
-' NOT CURRENTLY CALLED FROM ANYWHERE in this module - kept for reference or
-' possible future use. Flagging rather than removing since you're reading
-' through to decide what's worth keeping.
-'
+' NOT CURRENTLY CALLED FROM ANYWHERE in this module. Kept (2026-09-30
+' decision) - useful if something ever needs "give me the actual calendar
+' date for week N, day D" outside the pick-ref system, e.g. a report
+' header, or the future grading/sizing projection sheet's time windows.
 ' PARAMETERS:
 '   iYear     - 4-digit year
 '   iWeek     - Week number (1-53)
@@ -207,26 +207,38 @@ End Function
 
 ' =============================================================================
 ' HELPER: charCheck
-' Converts an ASCII character code to a column letter string.
-' Handles columns beyond Z (e.g. AA, AB...) by prepending "A".
+' Converts a column number (passed in ASCII-style, i.e. column + 64) to its
+' Excel column letters.
 '
 ' PARAMETERS:
-'   charVal - ASCII value of a column letter (65=A, 90=Z, 91+ = AA, AB...)
+'   charVal - column number + 64 (65=column 1="A", 90=column 26="Z",
+'             91=column 27="AA", ... - the "+64" convention is historical,
+'             kept so every existing call site stays unchanged)
 '
-' NOTE: Currently only handles up to AZ (column 52). If you ever need
-'       columns beyond AZ, this function needs to be expanded.
-'       The current logic just prefixes "A" for anything > 90, which means
-'       91="AA", 92="AB", ..., 116="AZ". Beyond that it would break.
+' UPDATED 2026-09-30: now uses the same general algorithm Excel itself uses
+' to convert a column number to letters, so it works for any column - the
+' old version prefixed a literal "A" for anything past column 52 (AZ),
+' which broke beyond that point.
 ' =============================================================================
 Public Function charCheck(charVal) As String
-    If charVal > 90 Then
-        ' -26 wraps back into the A-Z range: 91 ("Z"+1) becomes 65 ("A") again,
-        ' so charVal=91 -> Chr(65)="A" -> result "AA". charVal=92 -> Chr(66)="B"
-        ' -> result "AB". It's re-using the same 65-90 range as a second "digit".
-        charCheck = "A" & Chr(charVal - 26)
-    Else
-        charCheck = Chr(charVal)
-    End If
+    ' General column-number-to-letters algorithm (the same one Excel itself
+    ' uses internally) - works for any column, not just up to AZ (52), which
+    ' was the old ceiling. charVal keeps this function's existing calling
+    ' convention (column number + 64, ASCII-style) used everywhere it's
+    ' called - convert back to a true 1-based column number first, then
+    ' build the letters from that.
+    Dim colNum As Long
+    colNum = charVal - 64
+
+    Dim result As String
+    Do While colNum > 0
+        Dim remainder As Long
+        remainder = (colNum - 1) Mod 26
+        result = Chr(65 + remainder) & result
+        colNum = (colNum - 1) \ 26
+    Loop
+
+    charCheck = result
 End Function
 
 
@@ -256,6 +268,11 @@ End Sub
 ' Forces the custom Ribbon labels (e.g. "Last Updated", "Last Sent")
 ' to re-read their values and redisplay.
 ' Called after data updates and after sending email.
+'
+' This is necessary, not decorative: custom ribbon controls driven by
+' getLabel/getPressed callbacks only re-run that callback when something
+' tells them to - Excel doesn't poll them on its own. InvalidateControl is
+' the only way to make that happen outside of the ribbon's initial load.
 ' =============================================================================
 Sub ForceRibbonRefresh()
     If Not gRibbon Is Nothing Then
@@ -345,13 +362,12 @@ End Function
 '   progress - A value between 0.0 (start) and 1.0 (complete)
 '              Values outside this range are clamped.
 '
-' MINOR QUIRK (found while documenting, not fixed - your call whether it's
-' worth touching): the two phases aren't quite continuous at progress=0.5.
-' Phase 1 approaches g=255*(0.5/0.5)=255 as progress nears 0.5 from below.
-' Phase 2 at progress=0.5 exactly gives g=255-(0.5*255/8)=239.06. That's a
-' visible ~16-unit dip in the green channel right at the halfway point -
-' probably imperceptible during a fast-moving progress bar, but it's a real,
-' verifiable discontinuity, not just a rounding artifact.
+' FIXED 2026-09-30: the two phases used to not be continuous at progress=0.5
+' (phase 1 approaches g=255, phase 2 started at g=239.06 - a visible ~16-unit
+' dip). Phase 2's green channel now starts exactly where phase 1 left off
+' (255) and fades linearly to the same end value as before (223 at
+' progress=1.0), so the "slight fade to avoid overly bright green" effect is
+' preserved but the jump at the boundary is gone.
 ' =============================================================================
 Function GetProgressColor(progress As Double) As Long
     If progress < 0 Then progress = 0
@@ -368,14 +384,12 @@ Function GetProgressColor(progress As Double) As Long
     Else
         ' Phase 2 (50% to 100%): Yellow to Green
         ' Red ramps down from 255 to 0.
-        ' Green *should* stay at 255 for a pure Yellow->Green fade, but this
-        ' formula ties it to `progress` itself (not the 0-1 phase-2 fraction),
-        ' so it drifts down to 255-(1*255/8)=223 by the time progress=1.0 -
-        ' a deliberate "slight fade to avoid overly bright green" per the
-        ' original comment here, not a mistake, just worth knowing it's
-        ' progress-linked rather than a fixed target colour.
+        ' Green fades linearly from 255 (continuous with phase 1's endpoint)
+        ' down to 223 at progress=1.0 - same end value the old formula gave,
+        ' just reached smoothly instead of jumping there from 239 at the
+        ' halfway point.
         r = 255 * (1 - ((progress - 0.5) / 0.5))
-        g = 255 - (progress * 255 / 8)
+        g = 255 - (((progress - 0.5) / 0.5) * 32)
     End If
 
     GetProgressColor = RGB(r, g, b)
@@ -567,6 +581,46 @@ Function IsCountAsOrdered(countToCheck As String, commentText As String) As Bool
     ' If no match found, return False (implicit via unset boolean)
 End Function
 
+' Pipe-delimited reference data: MODE|PACK|CartonsPerPallet
+' MODE is "H" (High Cube) or "S" (Standard Cube) - see LookupCartonCount.
+' TO ADD A NEW PACK/COUNT: add one line here. Nothing else needs to change.
+Private Const CARTON_COUNT_DATA As String = _
+    "H|A15C|80" & vbCrLf & "H|E10D|104" & vbCrLf & "H|E10D/D10D|104" & vbCrLf & "H|D10D|112" & vbCrLf & _
+    "H|E15D|65" & vbCrLf & "H|E15C|65" & vbCrLf & "H|D15D|70" & vbCrLf & "H|D15C|70" & vbCrLf & _
+    "H|A07D|140" & vbCrLf & "H|G15C|50" & vbCrLf & _
+    "S|A15C|70" & vbCrLf & "S|E10D|88" & vbCrLf & "S|E10D/D10D|88" & vbCrLf & "S|D10D|96" & vbCrLf & _
+    "S|E15D|55" & vbCrLf & "S|E15C|55" & vbCrLf & "S|D15D|60" & vbCrLf & "S|D15C|60" & vbCrLf & _
+    "S|A07D|120" & vbCrLf & "S|G15C|45"
+
+' =============================================================================
+' HELPER: LookupCartonCount
+' Looks up cartons-per-pallet for a given pallet mode and pack type, from
+' CARTON_COUNT_DATA. Replaces the old two-branch (High/Standard) Select Case
+' with a single data table - the same pattern SizeMapping.SIZE_DATA uses.
+'
+' PARAMETERS:
+'   modeChar - Column M's value for this line: "H" (High Cube) or "S"
+'              (Standard Cube, or anything else - treated as Standard)
+'   pack     - Column H's value for this line (the pack/carton code, e.g. "A15C")
+'
+' RETURNS: 0 if the mode/pack combination isn't found (same as the old
+'          Select Case leaving cartonCount unset, which VBA defaults to 0).
+' =============================================================================
+Private Function LookupCartonCount(ByVal modeChar As String, ByVal pack As String) As Integer
+    Dim modeKey As String
+    modeKey = IIf(modeChar = "H", "H", "S")
+
+    Dim lines() As String, f() As String, i As Long
+    lines = Split(CARTON_COUNT_DATA, vbCrLf)
+    For i = LBound(lines) To UBound(lines)
+        f = Split(lines(i), "|")
+        If f(0) = modeKey And f(1) = pack Then
+            LookupCartonCount = CInt(f(2))
+            Exit Function
+        End If
+    Next i
+End Function
+
 ' =============================================================================
 ' RIBBON WRAPPER: Setup_Stuff_R
 ' Called by the Ribbon button. Delegates to Setup_Stuff.
@@ -603,6 +657,13 @@ End Sub
 '   cartonCount = estimated cartons per pallet (varies by pack type and carton size)
 '   totCol      = column index of the "TOTAL" column (module-level, set here)
 '   stdcol      = column index of the "STD" column in Pakplan
+'
+' See ROADMAP.md item 5 (added 2026-09-30) for a bigger idea in this area:
+' a "pre-Vordering" staging sheet, built from Pakplan before Vordering is,
+' where lines could be sorted/grouped/paired properly - which would also
+' make it straightforward to support other packhouses' differently-shaped
+' packing instructions (see the long-term "pluggable Pakplan-reading logic"
+' direction further down in ROADMAP.md too).
 ' =============================================================================
 Public Sub Setup_Stuff()
     On Error GoTo ErrHandler
@@ -624,10 +685,10 @@ Public Sub Setup_Stuff()
     UserForm1.Label2.BackColor = vbMagenta
     UserForm1.Frame1.Caption = ""
 
-    Dim answer As String
+    Dim answer As VbMsgBoxResult
     shName = "Vordering"
     pName = "Pakplan"
-    answer = "6"   ' "6" = vbYes
+    answer = vbYes
 
     ' Ensure ribbon settings are initialised
     If GetAppSetting("FarmFilter", "") = "" Then SetAppSetting "FarmFilter", "All"
@@ -636,13 +697,13 @@ Public Sub Setup_Stuff()
     ' Create the Vordering sheet if it doesn't exist; otherwise ask the user
     If Not sheetExists(shName) Then
         ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count)).name = shName
-        answer = "6"  ' Auto-proceed if sheet is new
+        answer = vbYes  ' Auto-proceed if sheet is new
     Else
         ThisWorkbook.Sheets(shName).Select
         answer = MsgBox("Do you wish to setup the " & shName & " sheet?", vbQuestion + vbYesNo, "User Response")
     End If
 
-    If answer = "6" Then   ' User said Yes (or sheet was newly created)
+    If answer = vbYes Then   ' User said Yes (or sheet was newly created)
         UserForm1.Show (False)
         OptimizeVBA (True)
 
@@ -712,7 +773,16 @@ Public Sub Setup_Stuff()
         totCol = rngTotalCol.Column + 64
         sColtot = charCheck(totCol)
 
-        ' Hide the TOTAL column header text (small white font) to reduce clutter
+        ' Hide the TOTAL column header text (small white font) to reduce clutter.
+        ' Originally meant to double as a spot to record the version on the
+        ' sheet itself (for tracing a faulty emailed report back to its
+        ' version), but currently just hides the copied header text instead.
+        ' A real git commit hash isn't knowable from inside the running macro
+        ' at all (it's assigned only once the commit exists) - APP_VERSION is
+        ' the practical option, but writing it into THIS specific cell would
+        ' overwrite the TOTAL header text it currently holds, and it's not
+        ' yet confirmed whether anything else reads that text - worth
+        ' checking before repurposing it, rather than changing this blind.
         ThisWorkbook.Sheets(shName).Range(sColtot & (startline - 2)).Font.Color = vbWhite
         ThisWorkbook.Sheets(shName).Range(sColtot & (startline - 2)).Font.Size = 1
 
@@ -750,7 +820,9 @@ Public Sub Setup_Stuff()
             ' though Pakplan row 5 was skipped in between - that's k doing its job.
             j = (i - (startline - 1)) * block - (k * block) - (block - startline)
 
-            ' Only process rows flagged as H (Half pallet) or S (Standard)
+            ' Only process rows flagged as H (High Cube) or S (Standard Cube).
+            ' High Cube pallets fit the most cartons possible; Standard Cube
+            ' usually has a layer or two fewer.
             If (ThisWorkbook.Sheets(pName).Cells(i, "M").Value = "H") Or (ThisWorkbook.Sheets(pName).Cells(i, "M").Value = "S") Then
 
                 ' Copy the Pakplan row to Vordering at the calculated offset
@@ -882,30 +954,10 @@ Public Sub Setup_Stuff()
                         ' Special carton types always get 95
                         cartonCount = 95
                     Else
-                        ' Look up by carton code. "H" = High pallet, other = standard pallet.
-                        If ThisWorkbook.Sheets(shName).Cells(curRow - 1, "M").Value = "H" Then
-                            ' High pallet carton counts
-                            Select Case ThisWorkbook.Sheets(shName).Cells(curRow - 1, "H").Value
-                                Case "A15C":         cartonCount = 80
-                                Case "E10D", "E10D/D10D": cartonCount = 104
-                                Case "D10D":         cartonCount = 112
-                                Case "E15D", "E15C": cartonCount = 65
-                                Case "D15D", "D15C": cartonCount = 70
-                                Case "A07D":         cartonCount = 140
-                                Case "G15C":         cartonCount = 50
-                            End Select
-                        Else
-                            ' Standard pallet carton counts
-                            Select Case ThisWorkbook.Sheets(shName).Cells(curRow - 1, "H").Value
-                                Case "A15C":         cartonCount = 70
-                                Case "E10D", "E10D/D10D": cartonCount = 88
-                                Case "D10D":         cartonCount = 96
-                                Case "E15D", "E15C": cartonCount = 55
-                                Case "D15D", "D15C": cartonCount = 60
-                                Case "A07D":         cartonCount = 120
-                                Case "G15C":         cartonCount = 45
-                            End Select
-                        End If
+                        ' Look up cartons-per-pallet by pack type and pallet
+                        ' mode ("H" = High Cube, anything else = Standard
+                        ' Cube - see LookupCartonCount's own comment).
+                        cartonCount = LookupCartonCount(ThisWorkbook.Sheets(shName).Cells(curRow - 1, "M").Value, ThisWorkbook.Sheets(shName).Cells(curRow - 1, "H").Value)
                     End If
                 End If
 
@@ -941,7 +993,6 @@ Public Sub Setup_Stuff()
                     '   If any of "*", "L", "M", "S" appear, this is a "split size"
                     '   line - add Stock + Dispatched from other rows instead.
                     If InStr(1, ThisWorkbook.Sheets(shName).Range(colvar & i).Offset(j - i + 1).Value, "*") + InStr(1, ThisWorkbook.Sheets(shName).Range(colvar & i).Offset(j - i + 1).Value, "L") + InStr(1, ThisWorkbook.Sheets(shName).Range(colvar & i).Offset(j - i + 1).Value, "M") + InStr(1, ThisWorkbook.Sheets(shName).Range(colvar & i).Offset(j - i + 1).Value, "S") <> 0 Then
-                        ' Asterisk = use stock+dispatched sum instead (5.4.11.1 fix)
                         ThisWorkbook.Sheets(shName).Range(colvar & i).Offset(j - i + 2).Formula = _
                             "=IFERROR(" & colvar & (curRow + 2) & "+" & colvar & (curRow + 4) & ",0)"
                     Else
@@ -960,26 +1011,17 @@ Public Sub Setup_Stuff()
                     ' curRow+1=Dispatched (this is the same 6-row block, just addressed
                     ' from a different anchor point than earlier in this loop).
                     '
-                    ' PLAIN-ENGLISH TRANSLATION of the "As Ordered" formula below:
-                    '   IF Outstanding < 0 THEN -Outstanding
-                    '   ELSE IF (InStock + Dispatched) - Needed > 0 THEN that difference
-                    '   ELSE 0
-                    ' Outstanding is itself "Needed - (InStock + Dispatched)" (see the
-                    ' row-3 formula just above), so "Outstanding < 0" and
-                    ' "(InStock+Dispatched) - Needed > 0" are algebraically the *same*
-                    ' condition, just negated. That means once you reach the ELSE
-                    ' branch (Outstanding >= 0), the inner ">0" check can never be
-                    ' true - it always falls through to 0. Worth double-checking
-                    ' against real data rather than taking my algebra on faith, but
-                    ' if that holds, the inner IF is dead weight and this could
-                    ' simplify to "IF(Outstanding<0, -Outstanding, 0)".
+                    ' "As Ordered": overpack = how much was packed/dispatched above
+                    ' the ordered count. Simplified 2026-09-30: Outstanding is itself
+                    ' "Needed - (InStock+Dispatched)", so "Outstanding < 0" and
+                    ' "(InStock+Dispatched) - Needed > 0" are algebraically the same
+                    ' condition, just negated - the old formula's inner ">0" check
+                    ' could never be true once you reached its ELSE branch, so it's
+                    ' dropped here in favour of the equivalent direct form.
                     curRow = curRow + 2
                     If IsCountAsOrdered(ThisWorkbook.Sheets(shName).Range(colvar & startline).Formula, commentCheck) Then
-                        ' "As Ordered": overpack = how much above the ordered count was packed/dispatched
                         ThisWorkbook.Sheets(shName).Range(colvar & i).Offset(j - i + 5).Formula = _
-                            "=IF(" & colvar & (curRow - 2) & "<0,-" & colvar & (curRow - 2) & "," & _
-                            "IF((" & colvar & (curRow - 1) & "+" & colvar & (curRow + 1) & ")-" & colvar & (curRow - 3) & ">0," & _
-                            "(" & colvar & (curRow - 1) & "+" & colvar & (curRow + 1) & ")-" & colvar & (curRow - 3) & ",0))"
+                            "=IF(" & colvar & (curRow - 2) & "<0,-" & colvar & (curRow - 2) & ",0)"
                     Else
                         ' Standard: overpack only if total pack+dispatch > total needed
                         ThisWorkbook.Sheets(shName).Range(colvar & i).Offset(j - i + 5).Formula = _
@@ -1103,7 +1145,7 @@ Public Sub Setup_Stuff()
         Application.ScreenUpdating = True
         UserForm1.Hide
 
-    End If  ' answer = "6"
+    End If  ' answer = vbYes
 
     OptimizeVBA (False)
     Exit Sub
@@ -1140,8 +1182,9 @@ End Sub
 '   Pick Refs are 4-digit codes used to filter the pallet intake data.
 '   The encoding is: [last digit of week][day of week][0][first digit of week]
 '   for double-digit weeks, or [week][day]["00"] for single-digit weeks.
-'   These get rearranged into a sortable 4-char string: DDWW (day,day,week,week).
-'   The Power Query uses a custom order list (CustomOrder) to filter by range.
+'   Comparisons (both here in VBA and in the Power Query M code below) decode
+'   each pick ref into its real week+day value rather than comparing the
+'   encoded strings directly - see DecodePickRefKey just below.
 '
 ' APP SETTINGS (CustomDocumentProperties - see LocalConfig.GetAppSetting):
 '   FarmFilter       = "All" | "Mahela" | other (non-Mahela)
@@ -1150,6 +1193,39 @@ End Sub
 '   PickRef1         = Last selected start pick ref
 '   PickRef2         = Last selected end pick ref (current day)
 ' =============================================================================
+
+' =============================================================================
+' HELPER: DecodePickRefKey
+' Decodes a pick ref (see PICK REFERENCE FORMAT above) into a real,
+' numerically-sortable week*10+day value. Used throughout Update_Stuff in
+' place of comparing the encoded strings directly - see the FIXED note on
+' the comparisons below for why that used to sort wrong at the
+' week-9-to-10 boundary. Mirrors the M-code decode function used in the
+' Power Query below (DecodePickRefKey there, same logic, different language).
+'
+' Pads defensively to 4 characters first: a leading zero can be lost
+' upstream if a pick ref passes through a numeric context before being
+' saved (this happens whenever a week's last digit is 0 - weeks 10, 20, 30,
+' 40, 50 all start with "0" in their encoded form).
+' =============================================================================
+Private Function DecodePickRefKey(ByVal pr As String) As Long
+    Do While Len(pr) < 4
+        pr = "0" & pr
+    Loop
+
+    Dim modeChar As String
+    modeChar = Mid(pr, 4, 1)
+
+    Dim week As Long
+    If modeChar = "0" Then
+        week = CLng(Mid(pr, 1, 1))
+    Else
+        week = CLng(modeChar & Mid(pr, 1, 1))
+    End If
+
+    DecodePickRefKey = week * 10 + CLng(Mid(pr, 2, 1))
+End Function
+
 Public Sub Update_Stuff()
     On Error GoTo ErrHandler
     gAbortPipeline = False
@@ -1217,7 +1293,7 @@ Public Sub Update_Stuff()
     Dim pdchecker As String, pchecker As String
     Dim pcheck1 As String, pcheck2 As String, pcheck3 As String
     Dim curpickref As String, spickref As String
-    Dim p1 As String, p2 As String, ans As String
+    Dim p1 As String, p2 As String, ans As VbMsgBoxResult
     Dim found As Boolean, found2 As Boolean
 
     found = False: found2 = False
@@ -1225,7 +1301,7 @@ Public Sub Update_Stuff()
     testvar = -1: testvar2 = -1
     p1 = GetAppSetting("PickRef1", "")   ' Previously saved start ref
     p2 = GetAppSetting("PickRef2", "")   ' Previously saved end ref
-    ans = "7"   ' "7" = vbNo default
+    ans = vbNo   ' default
 
     ' --- Calculate today's pick reference strings ---
     ' curpickref = today's specific pick ref (week + day)
@@ -1267,96 +1343,58 @@ Public Sub Update_Stuff()
         pickedref1 = spickref
     End If
 
-    ' --- Rearrange pick ref strings into sortable format ---
-    ' HOW: "rotate so the 4th char goes first" means e.g. "2301" becomes
-    ' "1230" (last char moves to the front, the rest shift right). Verified
-    ' with real values: week=12, weekday=3 encodes as "2301" (see the
-    ' week>=10 branch above: last-digit-of-week, weekday, "0",
-    ' first-digit-of-week) - rotating gives "1230", putting the week's
-    ' first digit at the front so string comparison sorts by week first.
-    '
-    ' FINDING (verified, not just suspected): single-digit weeks are NOT
-    ' rotated the same way. week=9 encodes directly as "9300" (no rotation
-    ' needed since it's already "week, day, 00"). Comparing week 9's "9300"
-    ' against week 12's rotated "1230" as plain strings gives "9300" >
-    ' "1230" - i.e. week 9 would sort AFTER week 12, backwards from actual
-    ' chronological order. This only bites right at the week-9-to-10
-    ' boundary of a season, so whether it's ever actually hit depends on
-    ' whether your packing season spans that boundary while pick refs from
-    ' both sides are being compared - worth checking against your own
-    ' calendar rather than assuming either way. This is the same area the
-    ' TODO further up already flagged as "non-obvious... consider a
-    ' cleaner approach" - this finding is a concrete reason why.
-    If Len(p1) < 4 Then p1 = "0" & p1
-    If Len(p2) < 4 Then p2 = "0" & p2
-    p1 = Right(p1, 1) & Left(p1, 3)
-    p2 = Right(p2, 1) & Left(p2, 3)
-    curpickref = Right(curpickref, 1) & Left(curpickref, 3)
-    pickedref1 = Right(pickedref1, 1) & Left(pickedref1, 3)
-
     ' --- Determine pickedref2 (end of range) ---
+    ' FIXED 2026-09-30: this used to rotate each pick ref string (move the
+    ' 4th char to the front) so plain string comparison would sort by week
+    ' first - but single-digit weeks weren't rotated the same way, so week 9
+    ' sorted AFTER week 12 as plain strings ("9300" > "1230"), backwards from
+    ' actual chronological order. Comparisons now go through
+    ' DecodePickRefKey, which decodes each pick ref into its real week*10+day
+    ' value and compares THAT - correct for any week number, with no
+    ' rotation/un-rotation needed anywhere in this Sub any more.
     If GetAppSetting("WeekAutoMode", "OFF") = "OFF" Then
         ' Discard saved p2 if it's before p1
-        If p2 < p1 Then p2 = ""
-        If (p2 < curpickref) Then
-            If p2 = "" Then
-                p2 = curpickref
-            Else
-                ' Offer to use today's pick ref instead of the saved end ref
-                p2 = Right(p2, 3) & Left(p2, 1)
-                curpickref = Right(curpickref, 3) & Left(curpickref, 1)
-                ans = MsgBox("Do you want to use the latest Pick Ref, " & curpickref & "?" & Chr(13) & "(Current selection is " & p2 & ".)", vbQuestion + vbYesNo, "User Response")
-                p2 = Right(p2, 1) & Left(p2, 3)
-                curpickref = Right(curpickref, 1) & Left(curpickref, 3)
-            End If
+        If DecodePickRefKey(p2) < DecodePickRefKey(p1) Then p2 = ""
+        If p2 <> "" And DecodePickRefKey(p2) < DecodePickRefKey(curpickref) Then
+            ' Offer to use today's pick ref instead of the saved end ref
+            ans = MsgBox("Do you want to use the latest Pick Ref, " & curpickref & "?" & Chr(13) & "(Current selection is " & p2 & ".)", vbQuestion + vbYesNo, "User Response")
         End If
-        If ans = "6" Then p2 = curpickref  ' User said Yes
+        If p2 = "" Or ans = vbYes Then p2 = curpickref  ' No saved end ref, or user said Yes
 
         ' If still no end ref, ask the user for one
-        pickedref2 = Right(curpickref, 1) & Left(curpickref, 3)
+        pickedref2 = curpickref
         If p2 = "" Then
             Do
-                If pickedref1 > curpickref Then
-                    pickedref1 = Right(pickedref1, 3) & Left(pickedref1, 1)
+                If DecodePickRefKey(pickedref1) > DecodePickRefKey(curpickref) Then
                     pickedref2 = InputBox("Enter final Pick Reference needed: " & charCheck(13) & "(Selected start Pick Reference is " & pickedref1 & ")", "Week Number", pickedref1)
-                    pickedref1 = Right(pickedref1, 1) & Left(pickedref1, 3)
                 Else
-                    curpickref = Right(curpickref, 3) & Left(curpickref, 1)
                     pickedref2 = InputBox("Enter final Pick Reference needed: " & charCheck(13) & "(Today's Pick Reference is " & curpickref & ")", "Week Number", curpickref)
                 End If
                 If pickedref2 = "" Then pickedref2 = 0
-                pickedref2 = Right(pickedref2, 1) & Left(pickedref2, 3)
-                If pickedref2 < pickedref1 Then pickedref2 = "Whoops"  ' Invalidate if end < start
-                If Not IsNumeric(pickedref2) Then MsgBox "Please enter a valid number for the final Pick Reference number.", vbOKOnly
+                If Not IsNumeric(pickedref2) Then
+                    MsgBox "Please enter a valid number for the final Pick Reference number.", vbOKOnly
+                ElseIf DecodePickRefKey(pickedref2) < DecodePickRefKey(pickedref1) Then
+                    pickedref2 = "Whoops"  ' Invalidate if end < start
+                End If
             Loop Until IsNumeric(pickedref2)
-            pickedref2 = Right(pickedref2, 1) & Left(pickedref2, 3)
         Else
-            pickedref2 = Right(p2, 3) & Left(p2, 1)
+            pickedref2 = p2
         End If
-        pickedref2 = Right(pickedref2, 1) & Left(pickedref2, 3)
     Else
         ' Auto mode: use today as end ref, unless pickedref1 is in the future
-        If pickedref1 > curpickref Then
+        If DecodePickRefKey(pickedref1) > DecodePickRefKey(curpickref) Then
             pickedref2 = pickedref1
         Else
             pickedref2 = curpickref
         End If
     End If
 
-    ' --- Final format adjustment: ensure 4-digit pick refs with leading zeros ---
-    ' Re-rotate from sortable back to original order, then zero-pad to 4 digits
-    If (Mid(pickedref1, 2, 1) = "0") Then
-        pickedref1 = Right(pickedref1, 2) & Left(pickedref1, 1)
-    Else
-        pickedref1 = Right(pickedref1, 3) & Left(pickedref1, 1)
-    End If
-    If (Mid(pickedref2, 2, 1) = "0") Then
-        pickedref2 = Right(pickedref2, 2) & Left(pickedref2, 1)
-    Else
-        pickedref2 = Right(pickedref2, 3) & Left(pickedref2, 1)
-    End If
-    If Len(pickedref1) = 3 Then pickedref1 = "0" & pickedref1
-    If Len(pickedref2) = 3 Then pickedref2 = "0" & pickedref2
+    ' --- Final format adjustment: ensure 4-character pick refs with leading zeros ---
+    ' (DecodePickRefKey already pads defensively before decoding, so this is
+    ' only needed because pickedref1/pickedref2 get embedded directly as
+    ' literal text in the Power Query M code further down, which does not.)
+    If Len(pickedref1) < 4 Then pickedref1 = "0" & pickedref1
+    If Len(pickedref2) < 4 Then pickedref2 = "0" & pickedref2
 
     UserForm1.Show (False)
 
@@ -1398,6 +1436,11 @@ Public Sub Update_Stuff()
     UserForm1.Label2.Width = totPerc * 2
     DoEvents
 
+    ' WorkbookQuery.Refresh is a synchronous, blocking call with no exposed
+    ' progress property - Power Query doesn't report incremental refresh
+    ' progress back to VBA at all, so there's no real percentage to show
+    ' here. The before/after markers around this call are about as granular
+    ' as this API allows.
     ThisWorkbook.Queries(queryName).Formula = mCode
     ThisWorkbook.Queries(queryName).Refresh
 
@@ -1629,6 +1672,12 @@ End Sub
 '   - `ribref = True`  means this sub was called standalone (shows its own
 '                      progress bar and hides it when done)
 '   - `ribref = False` means it was called from Update_Stuff (shares the bar)
+'
+' OPEN QUESTION: only Input_Stuff has this curper-continuation exception -
+' Short_Stuff and Chart_Stuff restart their own percentage from 0 even when
+' called from Update_Stuff. Giving them the same treatment would make the
+' progress bar visually continuous end-to-end instead of resetting twice
+' mid-run - purely cosmetic, not yet done, not scoped.
 ' =============================================================================
 Sub Input_Stuff()
     On Error GoTo ErrHandler
@@ -1661,6 +1710,12 @@ Sub Input_Stuff()
         End If
     Next i
 
+    ' FOLLOW-UP PLANNED: vari is read directly from this cell everywhere it's
+    ' used (here, Export_Stuff, LocalConfig's save-path building), so a mixed
+    ' value like "APV/DEL" stays mixed instead of resolving to "VAL" the way
+    ' SizeMapping's family detection would. Worth normalizing via the same
+    ' DetectFamily logic, but needs a look at every place vari feeds into
+    ' first (filenames, email subject, etc.) before changing it.
     vari = ThisWorkbook.Sheets(shName).Cells(4, 4).Value
 
     Dim doubledCheck As Integer
@@ -1751,15 +1806,22 @@ Sub Input_Stuff()
                        (.Cells(dval, 16).Value = "D" & .Cells(ivalue, 16).Value) And _
                        (Not IsEmpty(.Cells(ivalue, 3))) Then
                         ' charCheck(j+64) turns the column NUMBER back into its own
-                        ' letter (j is always 17-26 here, i.e. Q-Z, well inside the
-                        ' plain Chr(64+n) trick charCheck falls back to for single
-                        ' letters - see charCheck's own comment). So this appends
+                        ' letter (j is always 17-26 here, i.e. Q-Z). This appends
                         ' "-<sameCol><dval+3>-<sameCol><dval+5>-0" to the formula
                         ' already sitting in that cell: subtract the neighbour
                         ' block's Stock and Dispatched cells, then a literal "-0"
                         ' tail. The "-0" is a marker, checked below, so this
                         ' subtraction is only appended once per cell even if
                         ' Input_Stuff runs again on top of an already-patched sheet.
+                        '
+                        ' FEEDBACK: this works, and is actually safer than it looks -
+                        ' BuildFullFormula's own output never naturally ends in "-0"
+                        ' (it ends in ",0)" or a cell reference like "-Q125"), so
+                        ' there's no real risk of a coincidental match. The one thing
+                        ' worth knowing is it's an implicit convention (a magic
+                        ' string suffix) rather than something explicit like a
+                        ' boolean helper column - fine as-is, just something a future
+                        ' reader has to learn rather than see directly.
                         If Not (Right(.Cells(ivalue + 1, j).Formula, 2) = "-0") Then
                             .Cells(ivalue + 1, j).Formula = .Cells(ivalue + 1, j).Formula & "-" & charCheck(j + 64) & (dval + 3) & "-" & charCheck(j + 64) & (dval + 5) & "-0"
                         End If
@@ -1797,33 +1859,6 @@ Sub Input_Stuff()
                                 doubledCheck = doubledCheck + 1
                             End If
                             dubdub = True
-                        End If
-
-                        ' Also check for the "D-prefix" neighbour pattern in earlier rows
-                        ivalue = k
-                        dval = k + 6
-                        If (k > 3) And (dval < (vorRows - 5)) And _
-                           (.Cells(dval, 3).Value = .Cells(ivalue, 3).Value) And _
-                           (.Cells(dval, 5).Value = .Cells(ivalue, 5).Value) And _
-                           (.Cells(dval, 6).Value = .Cells(ivalue, 6).Value) And _
-                           (.Cells(dval, 7).Value = .Cells(ivalue, 7).Value) And _
-                           (.Cells(dval, 8).Value = .Cells(ivalue, 8).Value) And _
-                           (.Cells(dval, 9).Value = .Cells(ivalue, 9).Value) And _
-                           (.Cells(dval, 10).Value = .Cells(ivalue, 10).Value) And _
-                           (.Cells(dval, 11).Value = .Cells(ivalue, 11).Value) And _
-                           (.Cells(dval, 16).Value = "D" & .Cells(ivalue, 16).Value) And _
-                           (Not IsEmpty(.Cells(ivalue, 3))) Then
-                            If Not (Right(.Cells(ivalue + 1, j).Formula, 2) = "-0") Then
-                                ' FINDING: this is a leftover debug prompt, not a
-                                ' user-facing warning - it just dumps the cell's
-                                ' current value with no explanation of what it means
-                                ' or why it's being shown. If this condition is ever
-                                ' true during a real Update Data run, whoever is
-                                ' sitting at the keyboard gets a blocking MsgBox they
-                                ' can't make sense of. Worth deciding whether to
-                                ' remove it, or turn it into a real message/log entry.
-                                MsgBox (.Cells(ivalue + 1, j).Value)
-                            End If
                         End If
 
                         ' Once we reach the current row, stop scanning
@@ -1882,6 +1917,11 @@ Sub Input_Stuff()
                 ' counts are never captured into arrNextCount. In practice this
                 ' only matters when the same attributes appear 3+ times, which the
                 ' redistribution logic below doesn't otherwise account for either.
+                ' Confirmed 2026-09-30: this is a real, hit-in-practice gap, not
+                ' hypothetical - tracked as ROADMAP.md item 5, alongside the
+                ' pre-Vordering staging sheet that should make it much easier to
+                ' handle properly (sorting/pairing lines before layout, rather
+                ' than detecting duplicates after the fact row-by-row here).
                 For k = i To (vorRows - 5)
                     With ThisWorkbook.Worksheets(shName)
                         If ((.Cells(iNumb, 3).Value = .Cells(k, 3).Value) And _
@@ -1934,6 +1974,14 @@ Sub Input_Stuff()
                     ' one column and decrements `changable`, so the loop is
                     ' guaranteed to terminate once every movable pallet has been used
                     ' or the target (iDisp = iNeed / iOut = 0) is reached.
+                    '
+                    ' KNOWN GAP (confirmed 2026-09-30, tracked in ROADMAP.md item 5):
+                    ' this redistribution doesn't check whether a size is under an
+                    ' "As Ordered" instruction before moving a pallet between
+                    ' Dispatched and Stock - that movement could throw off the As
+                    ' Ordered overpack count for that size. Worth re-examining once
+                    ' duplicates are handled before layout (the pre-Vordering sheet)
+                    ' instead of detected after the fact here.
 
                     ' --- Phase 1: Reduce Dispatched to match Needed ---
                     ' If more was dispatched than needed, move some back to Stock
@@ -2071,15 +2119,10 @@ Public Sub Export_Stuff()
     If Not EnsureEntitled() Then Exit Sub
     InitiateConstants
 
-    Dim answ As String
-    ' MsgBox actually returns an Integer (vbYes = 6, vbNo = 7); assigning it into
-    ' a String variable auto-converts it to the text "6"/"7", which is why the
-    ' check below compares against the literal string "6" instead of vbYes.
-    ' Comparing answ = vbYes directly would read more clearly, but works the
-    ' same either way.
+    Dim answ As VbMsgBoxResult
     answ = MsgBox("Do you want to Save & Send?", vbQuestion + vbYesNo, "User Response")
 
-    If answ = "6" Then   ' User confirmed
+    If answ = vbYes Then   ' User confirmed
         Dim wbSource As Workbook, wbNew As Workbook
         Dim wsCopy As Worksheet, wsValues As Worksheet
         Dim wsSummary As Worksheet, wsChart As Worksheet, wsNew As Worksheet
@@ -2217,10 +2260,12 @@ End Sub
 '       before sending. This is intentional for quality control.
 '
 ' The greeting text differs between "Ohr" (Afrikaans, no "Groete" sign-off)
-' and "Junction" (Afrikaans, includes "Groete"). This is determined by
-' checking mBCC against a known email address.
-' TODO: Consider a more robust way to distinguish these contexts (maybe
-'       a named cell or constant instead of checking an email address).
+' and "Junction" (Afrikaans, includes "Groete"). CORRECTED 2026-09-30: this
+' comment used to say it was determined by checking mBCC against a known
+' email address - that was never actually true of the code below, which
+' checks mContext directly. mContext (set per-machine in
+' LocalConfig.InitiateConstants) already is the dedicated, robust mechanism
+' the old TODO here was asking for.
 ' =============================================================================
 Sub Mail_Stuff(sPath As String, wkn As Integer)
     Dim OutApp As Object
@@ -2307,28 +2352,18 @@ Sub Short_Stuff()
 
     shName = "Vordering"
     Dim short As String
-    Dim sanswer As String
     Dim checkLoad As Boolean
     Dim prog As Double
     Dim iRows As Integer
 
     checkLoad = False
     short = "Opsomming"
-    ' FINDING: sanswer is set to "6" here, and again in the "create sheet" branch
-    ' below, but the "sheet already exists" branch never changes it - so by the
-    ' time we reach "If sanswer = "6"" further down, it is unconditionally "6"
-    ' on every code path. That condition can never be False. This looks like a
-    ' leftover from an earlier version that asked something like "Overwrite
-    ' existing summary?" via MsgBox and stored the vbYes/vbNo answer in
-    ' sanswer - worth either removing the dead check or restoring the prompt.
-    sanswer = "6"
     totCol = ThisWorkbook.Sheets(shName).Range("Q" & startline & ":AZ" & startline).Find("TOTAL", , xlValues, xlWhole).Column + 64
     iRows = (ThisWorkbook.Sheets(shName).Range("A" & startline & ":A" & 1000).Find("GRAND TOTA*", , xlValues, xlWhole).Row + 5) * 3
 
     ' Create the sheet if needed, otherwise just select it
     If Not sheetExists(short) Then
         ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count)).name = short
-        sanswer = "6"
     Else
         ThisWorkbook.Sheets(short).Select
     End If
@@ -2351,10 +2386,9 @@ Sub Short_Stuff()
         checkLoad = True
     End If
 
-    If sanswer = "6" Then
-        ' Clear old data from summary sheet
-        ThisWorkbook.Worksheets(short).Rows(1 & ":" & Round(iRows / 5)).Delete
-        OptimizeVBA (True)
+    ' Clear old data from summary sheet
+    ThisWorkbook.Worksheets(short).Rows(1 & ":" & Round(iRows)).Delete
+    OptimizeVBA (True)
 
         ' Copy the header row from Vordering to Opsomming row 1
         ThisWorkbook.Sheets(shName).Range("A" & startline & ":" & charCheck(totCol) & startline).Copy _
@@ -2382,10 +2416,6 @@ Sub Short_Stuff()
         Dim i As Integer, j As Integer, m As Integer
         Dim k As Integer
         k = 1   ' Current row in Opsomming (starts at 1 = header)
-
-        ' FINDING: sLine is declared but never assigned or read anywhere in this
-        ' Sub (or the rest of the module) - safe to remove.
-        Dim sLine(16) As String
 
         ' --- Main loop: copy "Pallets Outstanding" rows from Vordering to Opsomming ---
         For i = startline To finRow
@@ -2472,8 +2502,6 @@ Sub Short_Stuff()
             .Color = vbBlack
             .Weight = xlMedium
         End With
-
-    End If  ' sanswer = "6"
 
     OptimizeVBA (False)
     ThisWorkbook.Worksheets(short).Select
@@ -2650,18 +2678,17 @@ Sub Chart_Stuff()
                 .DataLabels.Font.Bold = True
                 .DataLabels.Font.Size = 11
                 ' Remove data labels for zero slices (keeps chart clean).
-                ' WORTH CHECKING: this loop runs unconditionally, so in the
-                ' all-zero branch above it will also match the "0" label we
-                ' just deliberately set on Points(1) two lines up (the one the
-                ' header comment describes as "an empty chart with a '0'
-                ' label") and delete it too - meaning a fully empty item may
-                ' end up with no label at all rather than the intended "0".
-                ' Worth confirming visually next time an item has zero pallets
-                ' needed and zero packed.
+                ' FIXED 2026-09-30: this used to run unconditionally, so in the
+                ' all-zero branch above it also matched (and deleted) the "0"
+                ' label deliberately set on Points(1) two lines up - only run
+                ' the cleanup when there's a real (non-placeholder) chart to
+                ' clean up.
                 Dim pt As Point
-                For Each pt In .Points
-                    If pt.DataLabel.text = "0" Then pt.DataLabel.Delete
-                Next pt
+                If inStock + dispatched + outstanding <> 0 Then
+                    For Each pt In .Points
+                        If pt.DataLabel.text = "0" Then pt.DataLabel.Delete
+                    Next pt
+                End If
             End With
             ' Chart title: variety - pack - grade - batch (and mark if present)
             .HasTitle = True
@@ -2747,4 +2774,5 @@ Public Sub HandleModuleError(procName As String)
         SendErrorReport procName, errNum, errDesc, context
     End If
 End Sub
+
 
